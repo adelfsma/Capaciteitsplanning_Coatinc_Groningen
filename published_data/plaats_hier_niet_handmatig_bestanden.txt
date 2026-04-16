@@ -1,0 +1,1 @@
+Deze map wordt automatisch bijgewerkt door manager_app.py.
