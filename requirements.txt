@@ -3,3 +3,4 @@ pandas
 numpy
 openpyxl
 matplotlib
+supabase>=2.0.0
