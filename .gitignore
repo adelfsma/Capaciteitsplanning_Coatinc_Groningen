@@ -1,0 +1,12 @@
+# Credentials — NOOIT committen naar GitHub
+.streamlit/secrets.toml
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Lokale tijdelijke bestanden
+staging_upload/
+published_data/*.xlsx
