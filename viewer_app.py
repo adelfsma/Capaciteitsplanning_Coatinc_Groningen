@@ -47,6 +47,9 @@ if os.path.exists("logo_coatinc_groningen.png"):
     st.sidebar.image("logo_coatinc_groningen.png", use_container_width=True)
 st.sidebar.caption(APP_VERSION)
 
+password = st.sidebar.text_input("Wachtwoord", type="password")
+if password != "coatinc2026":
+    st.stop()
 meta = load_metadata()
 if meta:
     st.sidebar.markdown("**Laatste publicatie**")
