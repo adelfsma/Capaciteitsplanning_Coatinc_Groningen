@@ -10,18 +10,27 @@ import streamlit as st
 APP_VERSION = "v2.2"
 
 STATUS_MAP = {
+    # Afgerond / opgehaald
     "uitgeleverd": "Verzinkt",
-    "PC Afgehaald": "Verzinkt",
-    "UB V Gereed": "UB",
     "Afgehaald": "Verzinkt",
-    "Gereed": "Verzinkt",
-    "UB": "UB",
+    "PC Afgehaald": "Verzinkt",
     "coat gereed": "Verzinkt",
+    "Gereed": "Verzinkt",
+    "Nabewerking nog uitvoeren": "Verzinkt",
+    # UB (uitbesteed)
+    "UB": "UB",
+    "UB V Gereed": "UB",
+    # Nog te verzinken
     "Opgehangen": "Niet verzinkt",
+    "PC Opgehangen": "Niet verzinkt",       # zelfde als Opgehangen
     "Voorbewerking uitvoeren": "Niet verzinkt",
     "Productie gereed": "Niet verzinkt",
-    "Nabewerking nog uitvoeren": "Verzinkt",
     "Ontzinkt": "Niet verzinkt",
+    "Gereserveerd*": "Niet verzinkt",       # reserveringen meenemen in planning
+    "Geblokkeerd": "Niet verzinkt",         # geblokkeerd maar nog niet verzinkt
+    # Overig
+    "meetrapport": "Verzinkt",              # administratief, geen capaciteitsimpact
+    "Niet gezien": "Niet verzinkt",         # aanwezig maar nog niet ingepland
 }
 
 NL_DAY_ABBR = {0: "ma", 1: "di", 2: "wo", 3: "do", 4: "vr", 5: "za", 6: "zo"}
@@ -36,6 +45,10 @@ REQUIRED_FILES = [
     "Export+4.xlsx",
     "feestdagen.xlsx",
 ]
+
+# Optioneel: CGS-planningsexport (verzinken productielijn)
+# Als aanwezig, worden CGS-orders die NIET al in de weekexports zitten toegevoegd.
+OPTIONAL_FILES = ["Export_CGS.xlsx"]
 
 _TEMP_DIR = Path(tempfile.gettempdir()) / "cap_planning_cache"
 
@@ -137,6 +150,55 @@ def _ensure_temp() -> Path:
     return _TEMP_DIR
 
 
+def _load_cgs_as_export_rows(tmp: Path, existing_cgs_ids: set) -> tuple[pd.DataFrame, int]:
+    """
+    Lees Export_CGS.xlsx en zet de rijen om naar hetzelfde formaat als de weekexports.
+    Alleen orders met ProductieLijn=VZ die NIET al in de weekexports zitten worden toegevoegd.
+    Geeft (dataframe, aantal_toegevoegd) terug.
+    """
+    cgs_path = tmp / "Export_CGS.xlsx"
+    if not cgs_path.exists():
+        return pd.DataFrame(), 0
+
+    cgs = pd.read_excel(cgs_path)
+
+    # Alleen verzinken orders die nog niet in exports zitten
+    cgs = cgs[cgs["ProduktieLijn"] == "VZ"].copy()
+    cgs = cgs[~cgs["OrderID"].isin(existing_cgs_ids)].copy()
+
+    if cgs.empty:
+        return pd.DataFrame(), 0
+
+    # Status bepalen op basis van StatusDiensten-string
+    # Positie 3 = 'O' → order nog niet gestart
+    # Positie 7 = 'A' → administratief afgerond
+    # Positie 14 = 'R' → gereserveerd
+    # Positie 15 = 'U' → uit te voeren
+    # Als 'U' aanwezig en niet 'R' → Productie gereed (nog te verzinken)
+    def _cgs_status(s: str) -> str:
+        s = str(s)
+        if "R" in s[13:16]:
+            return "Gereserveerd*"
+        if "U" in s[13:16]:
+            return "Productie gereed"
+        return "Productie gereed"
+
+    rows = []
+    for _, r in cgs.iterrows():
+        rows.append({
+            "Status": _cgs_status(r["StatusDiensten"]),
+            "Nummer": str(r.get("ReferentieKlant", r["OrderID"])),
+            "Datum": r["LeverDatum"],
+            "Gewicht": r["Gewicht"],
+            "Bronbestand": "Export_CGS.xlsx",
+            "Bron_week": "CGS",
+            "CgsNummer": r["OrderID"],
+        })
+
+    df = pd.DataFrame(rows)
+    return df, len(df)
+
+
 def load_published_data():
     """
     Downloads all required files from the cloud bucket into a local temp
@@ -159,12 +221,16 @@ def load_published_data():
             + ", ".join(missing)
         )
 
-    # Download each required file to the temp dir
+    # Download required files
     for fname in REQUIRED_FILES:
         raw = download_file(fname)
         (tmp / fname).write_bytes(raw)
 
-    # --- From here: same processing logic as before ---
+    # Download optional files if available
+    for fname in OPTIONAL_FILES:
+        if fname in available:
+            raw = download_file(fname)
+            (tmp / fname).write_bytes(raw)
 
     validate_required_files_in_folder(tmp)
 
@@ -194,6 +260,12 @@ def load_published_data():
         )
 
     export = pd.concat(export_frames, ignore_index=True)
+
+    # Verzamel alle CgsNummers die al in de weekexports zitten
+    existing_cgs_ids: set = set()
+    if "CgsNummer" in export.columns:
+        existing_cgs_ids = set(export["CgsNummer"].dropna().astype(int))
+
     order = pd.read_excel(tmp / "OrderExport2G.xlsx")
     holiday_df = pd.read_excel(tmp / "feestdagen.xlsx")
 
@@ -233,6 +305,25 @@ def load_published_data():
         merged["Gewicht_export_kg"],
         merged["Gewicht_2g_verdeeld_kg"],
     )
+
+    # CGS-orders toevoegen die nog niet in weekexports zitten
+    cgs_df, cgs_count = _load_cgs_as_export_rows(tmp, existing_cgs_ids)
+    if cgs_count > 0:
+        cgs_df["Gewicht_export_kg"] = coerce_numeric(cgs_df["Gewicht"])
+        cgs_df["Leverdatum"] = pd.to_datetime(cgs_df["Datum"], errors="coerce")
+        cgs_df["Verzinkstatus"] = cgs_df["Status"].map(STATUS_MAP)
+        cgs_df["Ordernummer_base"] = np.nan
+        cgs_df["Gewicht_order_kg"] = np.nan
+        cgs_df["Regels_per_order"] = 1
+        cgs_df["Gewicht_2g_verdeeld_kg"] = np.nan
+        cgs_df["Gewicht_bron"] = "CGS"
+        cgs_df["Gewicht_effectief_kg"] = cgs_df["Gewicht_export_kg"]
+        merged = pd.concat([merged, cgs_df], ignore_index=True)
+        export_file_summary.append({
+            "Bronbestand": "Export_CGS.xlsx",
+            "Bron_week": "CGS",
+            "Aantal_regels_ingelezen": cgs_count,
+        })
 
     holiday_df["Datum"] = pd.to_datetime(holiday_df["Datum"], errors="coerce").dt.date
     holiday_df = (
