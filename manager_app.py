@@ -8,6 +8,7 @@ import streamlit as st
 from shared import (
     APP_VERSION,
     REQUIRED_FILES,
+    OPTIONAL_FILES,
     load_metadata,
     publish_files,
     save_metadata,
@@ -63,6 +64,15 @@ for i, fname in enumerate(REQUIRED_FILES):
     with upload_cols[i % 2]:
         uploads[fname] = st.file_uploader(f"Upload {fname}", type=["xlsx"], key=fname)
 
+st.markdown("**Optionele bestanden**")
+opt_cols = st.columns(2)
+for i, fname in enumerate(OPTIONAL_FILES):
+    with opt_cols[i % 2]:
+        uploads[fname] = st.file_uploader(
+            f"Upload {fname} (optioneel – CGS verzinkplanning)",
+            type=["xlsx"], key=fname
+        )
+
 st.markdown("---")
 
 # ── Validatiestatus ────────────────────────────────────────────────────────────
@@ -80,8 +90,18 @@ for fname in REQUIRED_FILES:
     validation_rows.append(
         {
             "Bestand": fname,
+            "Vereist": "Ja",
             "Nieuw geüpload": "✅ Ja" if uploads.get(fname) is not None else "–",
             "Staat al in cloud": "✅ Ja" if fname in cloud_files else "❌ Nee",
+        }
+    )
+for fname in OPTIONAL_FILES:
+    validation_rows.append(
+        {
+            "Bestand": fname,
+            "Vereist": "Optioneel",
+            "Nieuw geüpload": "✅ Ja" if uploads.get(fname) is not None else "–",
+            "Staat al in cloud": "✅ Ja" if fname in cloud_files else "–",
         }
     )
 st.dataframe(pd.DataFrame(validation_rows), use_container_width=True, hide_index=True)
@@ -114,6 +134,12 @@ if publish:
             (tmp_dir / fname).write_bytes(data)
 
         validate_required_files_in_folder(tmp_dir)
+
+        # Upload optional files if provided (no validation required)
+        for fname in OPTIONAL_FILES:
+            if uploads.get(fname) is not None:
+                stage[fname] = uploads[fname].getbuffer().tobytes()
+                (tmp_dir / fname).write_bytes(stage[fname])
 
         # All valid → upload newly uploaded files to cloud
         newly_uploaded = {
