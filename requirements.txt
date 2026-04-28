@@ -2,5 +2,6 @@ streamlit
 pandas
 numpy
 openpyxl
-matplotlib
-supabase>=2.0.0
+httpcore>=1.0.8
+supabase>=2.9.0
+
