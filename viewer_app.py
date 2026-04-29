@@ -44,7 +44,7 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
     return fig
 
 if os.path.exists("logo_coatinc_groningen.png"):
-    st.sidebar.image("logo_coatinc_groningen.png", use_container_width=True)
+    st.sidebar.image("logo_coatinc_groningen.png", width=200)
 st.sidebar.caption(APP_VERSION)
 
 meta = load_metadata()
@@ -102,24 +102,26 @@ with tab1:
         if row["Dagtype"] == "Feestdag / sluiting":
             return ["background-color: rgba(220, 38, 38, 0.12)"] * len(row)
         return [""] * len(row)
-    st.dataframe(dag_display[["Verzinkdatum","Dagtype","Aantal_orders_te_verzinken","Gewicht_kg","Capaciteit_kg","Benutting_pct","Traverses_berekend","Status"]].style.apply(mark_holiday_row, axis=1), use_container_width=True, hide_index=True)
+    st.dataframe(dag_display[["Verzinkdatum","Dagtype","Aantal_orders_te_verzinken","Gewicht_kg","Capaciteit_kg","Benutting_pct","Traverses_berekend","Status"]].style.apply(mark_holiday_row, axis=1), width="stretch", hide_index=True)
     st.subheader("Weekoverzicht")
     week_display = week.copy()
     week_display["Gewicht_kg"] = week_display["Gewicht_kg"].apply(format_int)
     week_display["Capaciteit_kg"] = week_display["Capaciteit_kg"].apply(format_int)
     week_display["Benutting_pct"] = week_display["Benutting_pct"].apply(format_pct)
     week_display["Traverses_berekend"] = week_display["Traverses_berekend"].astype(int)
-    st.dataframe(week_display[["Jaar","Week","Aantal_orders_te_verzinken","Gewicht_kg","Capaciteit_kg","Benutting_pct","Traverses_berekend","Status"]], use_container_width=True, hide_index=True)
+    st.dataframe(week_display[["Jaar","Week","Aantal_orders_te_verzinken","Gewicht_kg","Capaciteit_kg","Benutting_pct","Traverses_berekend","Status"]], width="stretch", hide_index=True)
     st.subheader("Feestdagen en fabriekssluiting")
     holiday_show = holiday_df.copy()
     holiday_show["Datum"] = pd.to_datetime(holiday_show["Datum"]).dt.strftime("%d-%m-%Y")
-    st.dataframe(holiday_show, use_container_width=True, hide_index=True)
+    st.dataframe(holiday_show, width="stretch", hide_index=True)
 
 with tab2:
     st.subheader("Gebruikte gegevens / controletabel")
     relevant_cols = ["Bronbestand","Bron_week","Nummer","Ordernummer_base","Status","Verzinkstatus","Meegeteld_in_planning","Reden_uitsluiting","Datum","Leverdatum","Verzinkdatum","Gewicht","Gewicht_export_kg","Gewicht_order_kg","Regels_per_order","Gewicht_2g_verdeeld_kg","Gewicht_bron","Gewicht_effectief_kg"]
     relevant_cols = [c for c in relevant_cols if c in df.columns]
     controle_df = df[relevant_cols].copy() if toon_alle_regels else df_plan[relevant_cols].copy()
+    if "Datum" in controle_df.columns:
+        controle_df["Datum"] = pd.to_datetime(controle_df["Datum"], errors="coerce").dt.date
     if "Leverdatum" in controle_df.columns:
         controle_df["Leverdatum"] = pd.to_datetime(controle_df["Leverdatum"], errors="coerce").dt.date
     if "Verzinkdatum" in controle_df.columns:
@@ -127,7 +129,7 @@ with tab2:
     for c in ["Gewicht_export_kg","Gewicht_order_kg","Gewicht_2g_verdeeld_kg","Gewicht_effectief_kg"]:
         if c in controle_df.columns:
             controle_df[c] = controle_df[c].round(2)
-    st.dataframe(controle_df, use_container_width=True, hide_index=True)
+    st.dataframe(controle_df, width="stretch", hide_index=True)
 
 with tab3:
     st.subheader("Debug samenvatting")
@@ -144,4 +146,6 @@ with tab3:
     ]
     for _, row in export_file_summary.iterrows():
         debug_rows.append({"Categorie":"Bestanden","Omschrijving":f'{row["Bronbestand"]} ({row["Bron_week"]})',"Waarde":int(row["Aantal_regels_ingelezen"])})
-    st.dataframe(pd.DataFrame(debug_rows), use_container_width=True, hide_index=True)
+    debug_df = pd.DataFrame(debug_rows)
+    debug_df["Waarde"] = debug_df["Waarde"].astype(str)
+    st.dataframe(debug_df, width="stretch", hide_index=True)
