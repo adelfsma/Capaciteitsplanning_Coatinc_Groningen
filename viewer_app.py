@@ -22,7 +22,7 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
             ax.axvspan(i - 0.5, i + 0.5, alpha=0.12, color="red", zorder=0)
     ax.bar(x, capacity, width=0.56, alpha=0.35, label="Capaciteit", zorder=2)
     ax.bar(x, load, width=0.36, label="Dagbelasting", zorder=3)
-    ax.set_title("Capaciteit versus dagbelasting", fontsize=15, pad=14)
+    ax.set_title("Capaciteit versus dagbelasting op verzinkdatum", fontsize=15, pad=14)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=0)
     ax.set_ylabel("KG")
@@ -90,6 +90,7 @@ with tab1:
     st.subheader("Eerstvolgende leverdatum")
     st.markdown(f'<div style="padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid #d0d7de; background-color: #f6f8fa; margin-bottom: 0.75rem;"><div style="font-size: 2.2rem; font-weight: 700;">{advies_datum.strftime("%d-%m-%Y")}</div></div>', unsafe_allow_html=True)
     st.pyplot(make_professional_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
+    st.caption("De grafiek toont de geplande belasting per verzinkdatum. De verzinkdatum is berekend als de leverdatum minus het ingestelde aantal werkdagen.")
     st.subheader("Dagoverzicht")
     dag_display = dag.copy()
     dag_display["Verzinkdatum"] = dag_display["Verzinkdatum"].dt.date
@@ -130,6 +131,19 @@ with tab2:
         if c in controle_df.columns:
             controle_df[c] = controle_df[c].round(2)
     st.dataframe(controle_df, width="stretch", hide_index=True)
+
+    # ── xlsx-export ──────────────────────────────────────────────────────
+    import io
+    xlsx_buffer = io.BytesIO()
+    with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
+        controle_df.to_excel(writer, index=False, sheet_name="Gebruikte gegevens")
+    xlsx_buffer.seek(0)
+    st.download_button(
+        label="📥 Download als Excel (.xlsx)",
+        data=xlsx_buffer,
+        file_name=f"capaciteitsplanning_export_{date.today().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 with tab3:
     st.subheader("Debug samenvatting")
