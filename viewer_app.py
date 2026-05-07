@@ -141,7 +141,7 @@ with tab1:
 
 with tab2:
     st.subheader("Gebruikte gegevens / controletabel")
-    relevant_cols = ["Bronbestand","Bron_week","Nummer","Ordernummer_base","Status","Verzinkstatus","Meegeteld_in_planning","Reden_uitsluiting","Datum","Leverdatum","Verzinkdatum","Gewicht","Gewicht_export_kg","Gewicht_order_kg","Regels_per_order","Gewicht_2g_verdeeld_kg","Gewicht_bron","Gewicht_effectief_kg"]
+    relevant_cols = ["Bronbestand","Bron_week","Nummer","Ordernummer_base","Debiteurnaam","Status","Verzinkstatus","Meegeteld_in_planning","Reden_uitsluiting","Datum","Leverdatum","Verzinkdatum","Gewicht","Gewicht_export_kg","Gewicht_order_kg","Regels_per_order","Gewicht_2g_verdeeld_kg","Gewicht_bron","Gewicht_effectief_kg"]
     relevant_cols = [c for c in relevant_cols if c in df.columns]
     controle_df = df[relevant_cols].copy() if toon_alle_regels else df_plan[relevant_cols].copy()
     if "Datum" in controle_df.columns:

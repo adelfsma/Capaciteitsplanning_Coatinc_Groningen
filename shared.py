@@ -268,6 +268,8 @@ def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataF
     reserveringen["Gewicht_bron"]           = "Reservering"
     reserveringen["Ordernummer_base"]       = reserveringen["Ordernummer"]
     reserveringen["Regels_per_order"]       = 1
+    if "Debiteurnaam" in order.columns:
+        reserveringen["Debiteurnaam"] = reserveringen["Debiteurnaam"] if "Debiteurnaam" in reserveringen.columns else order.loc[reserveringen.index, "Debiteurnaam"] if "Debiteurnaam" in order.columns else ""
     reserveringen["Bronbestand"]            = "OrderExport2G.xlsx"
     reserveringen["Bron_week"]              = "reservering"
 
@@ -365,8 +367,12 @@ def load_published_data():
         .reset_index()
     )
     merged = export.merge(row_counts, on="Ordernummer_base", how="left")
+    # Debiteurnaam meenemen als kolom beschikbaar is in OrderExport2G
+    order_merge_cols = ["Ordernummer", "Gewicht_order_kg"]
+    if "Debiteurnaam" in order.columns:
+        order_merge_cols.append("Debiteurnaam")
     merged = merged.merge(
-        order[["Ordernummer", "Gewicht_order_kg"]],
+        order[order_merge_cols],
         left_on="Ordernummer_base",
         right_on="Ordernummer",
         how="left",
