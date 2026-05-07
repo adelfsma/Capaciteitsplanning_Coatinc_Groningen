@@ -55,7 +55,14 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
     # Totaallabel boven de volledige balk
     for i, val in enumerate(load):
         if val > 0:
-            ax.text(i, val + ymax * 0.015, format_int(val), ha="center", va="bottom", fontsize=8)
+            ax.text(i, val + ymax * 0.015, format_int(val), ha="center", va="bottom", fontsize=8, fontweight="bold")
+
+    # Klein label per type binnen de balk
+    for i, (d, r) in enumerate(zip(definitief, reservering)):
+        if d > ymax * 0.06:  # alleen tonen als segment groot genoeg is
+            ax.text(i, d / 2, format_int(d), ha="center", va="center", fontsize=7, color="white")
+        if r > ymax * 0.06:
+            ax.text(i, d + r / 2, format_int(r), ha="center", va="center", fontsize=7, color="white")
     fig.tight_layout()
     return fig
 
