@@ -256,6 +256,7 @@ def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataF
         return pd.DataFrame()
 
     # Maak kolommen aan die aansluiten op de merged-structuur
+    reserveringen["Klantnaam"]              = reserveringen["Debiteurnaam"] if "Debiteurnaam" in reserveringen.columns else ""
     reserveringen["Nummer"]                 = reserveringen["Ordernummer"].astype(str)
     reserveringen["Leverdatum"]             = reserveringen["Datum_verzending"]
     reserveringen["Datum"]                  = reserveringen["Datum_verzending"]
@@ -380,6 +381,19 @@ def load_published_data():
     merged["Gewicht_2g_verdeeld_kg"] = (
         merged["Gewicht_order_kg"] / merged["Regels_per_order"]
     )
+    # Klantnaam: gebruik Debiteur uit CGS-export, vul aan met Debiteurnaam uit OrderExport2G
+    if "Debiteur" in merged.columns and "Debiteurnaam" in merged.columns:
+        merged["Klantnaam"] = merged["Debiteur"].where(
+            merged["Debiteur"].notna() & (merged["Debiteur"].astype(str).str.strip() != ""),
+            merged["Debiteurnaam"]
+        )
+    elif "Debiteur" in merged.columns:
+        merged["Klantnaam"] = merged["Debiteur"]
+    elif "Debiteurnaam" in merged.columns:
+        merged["Klantnaam"] = merged["Debiteurnaam"]
+    else:
+        merged["Klantnaam"] = ""
+
     merged["Gewicht_bron"] = np.where(
         merged["Gewicht_export_kg"].fillna(0) > 0,
         "Export+",
