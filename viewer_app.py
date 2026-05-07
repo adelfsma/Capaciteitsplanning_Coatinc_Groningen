@@ -13,15 +13,28 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
     plot_df = day_df.copy()
     labels = plot_df["Label_nl"].tolist()
     x = np.arange(len(plot_df))
-    capacity = plot_df["Capaciteit_kg"].tolist()
-    load = plot_df["Gewicht_kg"].tolist()
+    capacity   = plot_df["Capaciteit_kg"].tolist()
+    definitief = plot_df["Gewicht_definitief_kg"].tolist()
+    reservering = plot_df["Gewicht_reservering_kg"].tolist()
+    load       = plot_df["Gewicht_kg"].tolist()
     is_holiday = plot_df["Is_feestdag_of_sluiting"].tolist()
+
+    BLAUW      = "#2E75B6"
+    ORANJE     = "#F4A623"
+    GRIJS      = "#BDD7EE"
+
     fig, ax = plt.subplots(figsize=(11, 4.8))
     for i, holiday in enumerate(is_holiday):
         if holiday:
             ax.axvspan(i - 0.5, i + 0.5, alpha=0.12, color="red", zorder=0)
-    ax.bar(x, capacity, width=0.56, alpha=0.35, label="Capaciteit", zorder=2)
-    ax.bar(x, load, width=0.36, label="Dagbelasting", zorder=3)
+
+    # Capaciteitsbalk (achtergrond)
+    ax.bar(x, capacity, width=0.56, color=GRIJS, alpha=0.6, label="Capaciteit", zorder=2)
+
+    # Gestapelde dagbelasting: definitief + reservering
+    bars_def = ax.bar(x, definitief, width=0.36, color=BLAUW, label="Bevestigde orders", zorder=3)
+    bars_res = ax.bar(x, reservering, width=0.36, bottom=definitief, color=ORANJE, label="Reserveringen", zorder=3)
+
     ax.set_title("Capaciteit versus dagbelasting op verzinkdatum", fontsize=15, pad=14)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=0)
@@ -32,11 +45,14 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_alpha(0.3)
     ax.spines["bottom"].set_alpha(0.3)
-    ax.legend(frameon=False, ncols=2, loc="upper left")
+    ax.legend(frameon=False, ncols=3, loc="upper left")
+
     ymax = max(max(capacity) if capacity else 0, max(load) if load else 0) * 1.15
     if ymax <= 0:
         ymax = 1
     ax.set_ylim(0, ymax)
+
+    # Totaallabel boven de volledige balk
     for i, val in enumerate(load):
         if val > 0:
             ax.text(i, val + ymax * 0.015, format_int(val), ha="center", va="bottom", fontsize=8)
