@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.3"
+APP_VERSION = "v2.3.1"
 
 STATUS_MAP = {
     # Afgerond / opgehaald
@@ -202,77 +202,120 @@ def _load_cgs_as_export_rows(tmp: Path, existing_cgs_ids: set) -> tuple[pd.DataF
     return df, len(df)
 
 
+def _parse_order_date(series: pd.Series) -> pd.Series:
+    """
+    Parseer datumkolommen uit OrderExport2G.
+    Ondersteunt Excel-datums, tekst-datums en integer YYYYMMDD.
+    """
+    try:
+        as_str = series.dropna().astype(str).str.strip()
+        if len(as_str) > 0 and as_str.str.match(r"^\d{8}$").all():
+            return pd.to_datetime(series.astype(str), format="%Y%m%d", errors="coerce")
+        return pd.to_datetime(series, dayfirst=True, errors="coerce")
+    except Exception:
+        return pd.to_datetime(series, errors="coerce")
+
+
 def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataFrame:
     """
     Identificeer reserveringen: orders in OrderExport2G die nog NIET in de
-    CGS-exports staan, binnen het planningsvenster en voor de juiste locatie.
+    CGS-exports staan, binnen het planningsvenster en uitsluitend voor
+    Locatie V = RESERVERING_LOCATIE ("Coatinc Groningen").
 
-    Conform de Power BI Merge1-logica:
-      - Ordernummer niet in CGS-exports (geen match op Hoofdorder / Ordernummer_base)
-      - Datum verzending tussen vandaag - RESERVERING_WINDOW_VOOR
-                              en   vandaag + RESERVERING_WINDOW_NA
-      - Locatie V = RESERVERING_LOCATIE ("Coatinc Groningen")
-
-    Geeft een DataFrame terug in hetzelfde formaat als merged, klaar voor concat.
+    Aangepaste reserveringslogica:
+      - Alleen meenemen als Locatie V exact "Coatinc Groningen" is na trimmen.
+        Lege Locatie V of ontbrekende Locatie V wordt niet meegenomen.
+      - Verzinkdatum reservering:
+          1. Als Leverdatum V is gevuld: Leverdatum V - 2 werkdagen.
+          2. Als Leverdatum V leeg is: Datum verzending + 2 werkdagen.
+        Dus nooit Datum verzending - 2 werkdagen.
     """
-    today        = pd.Timestamp(date.today()).normalize()
+    today = pd.Timestamp(date.today()).normalize()
     window_start = today - timedelta(days=RESERVERING_WINDOW_VOOR)
-    window_end   = today + timedelta(days=RESERVERING_WINDOW_NA)
-
-    # Datum verzending parsen — ondersteunt zowel integer YYYYMMDD als echte datum
-    datum_raw = order["Datum verzending"].copy()
-    try:
-        as_str = datum_raw.dropna().astype(str).str.strip()
-        if as_str.str.match(r"^\d{8}$").all():
-            datum_col = pd.to_datetime(datum_raw.astype(str), format="%Y%m%d", errors="coerce")
-        else:
-            datum_col = pd.to_datetime(datum_raw, dayfirst=True, errors="coerce")
-    except Exception:
-        datum_col = pd.to_datetime(datum_raw, errors="coerce")
+    window_end = today + timedelta(days=RESERVERING_WINDOW_NA)
 
     order = order.copy()
-    order["Datum_verzending"] = datum_col
 
-    # Zoek de kolom "Locatie V" flexibel (spatie vs underscore vs geen spatie)
+    if "Datum verzending" not in order.columns:
+        return pd.DataFrame()
+
+    order["Datum_verzending"] = _parse_order_date(order["Datum verzending"])
+
+    # Zoek de kolom "Leverdatum V" flexibel.
+    leverdatum_v_col = None
+    for candidate in ["Leverdatum V", "LeverdatumV", "Leverdatum_V"]:
+        if candidate in order.columns:
+            leverdatum_v_col = candidate
+            break
+
+    if leverdatum_v_col:
+        order["Leverdatum_V"] = _parse_order_date(order[leverdatum_v_col])
+    else:
+        order["Leverdatum_V"] = pd.NaT
+
+    # Zoek de kolom "Locatie V" flexibel.
     locatie_col = None
     for candidate in ["Locatie V", "LocatieV", "Locatie_V"]:
         if candidate in order.columns:
             locatie_col = candidate
             break
 
-    # Basisfilter: niet in CGS-exports + binnen tijdvenster
+    # Locatie V is verplicht voor reserveringen. Als deze kolom ontbreekt,
+    # nemen we geen reserveringen mee om foutieve locatiebelasting te voorkomen.
+    if not locatie_col:
+        return pd.DataFrame()
+
+    locatie_match = order[locatie_col].astype(str).str.strip().eq(RESERVERING_LOCATIE)
+
+    # Basisfilter: niet in CGS-exports + binnen tijdvenster + juiste locatie.
+    # Het tijdvenster blijft gebaseerd op Datum verzending, conform bronexport.
     mask = (
         (~order["Ordernummer"].isin(cgs_ordernummers))
         & (order["Datum_verzending"] >= window_start)
         & (order["Datum_verzending"] <= window_end)
+        & locatie_match
     )
-    # Locatiefilter (optioneel: als kolom ontbreekt, alles meenemen en loggen)
-    if locatie_col:
-        mask &= order[locatie_col].astype(str).str.strip() == RESERVERING_LOCATIE
-    # else: geen locatiekolom gevonden — alle locaties meenemen (conservatief)
 
     reserveringen = order[mask].copy()
     if reserveringen.empty:
         return pd.DataFrame()
 
-    # Maak kolommen aan die aansluiten op de merged-structuur
-    reserveringen["Klantnaam"]              = reserveringen["Debiteurnaam"] if "Debiteurnaam" in reserveringen.columns else ""
-    reserveringen["Nummer"]                 = reserveringen["Ordernummer"].astype(str)
-    reserveringen["Leverdatum"]             = reserveringen["Datum_verzending"]
-    reserveringen["Datum"]                  = reserveringen["Datum_verzending"]
-    reserveringen["Status"]                 = "Reservering"
-    reserveringen["Verzinkstatus"]          = "Niet verzinkt"
-    reserveringen["Gewicht"]                = reserveringen["Gewicht_order_kg"]
-    reserveringen["Gewicht_export_kg"]      = np.nan
+    # Bereken verzinkdatum voor reserveringen volgens aangepaste businessregel.
+    reserveringen["Verzinkdatum_reservering"] = reserveringen.apply(
+        lambda r: subtract_workdays_existing_orders(r["Leverdatum_V"], 2)
+        if pd.notna(r["Leverdatum_V"])
+        else add_workdays_existing_orders(r["Datum_verzending"], 2)
+        if pd.notna(r["Datum_verzending"])
+        else pd.NaT,
+        axis=1,
+    )
+
+    # Voor display en aansluiting op bestaande structuur:
+    # Leverdatum = Leverdatum V indien gevuld, anders Datum verzending.
+    reserveringen["Leverdatum_reservering_basis"] = np.where(
+        reserveringen["Leverdatum_V"].notna(),
+        reserveringen["Leverdatum_V"],
+        reserveringen["Datum_verzending"],
+    )
+
+    # Maak kolommen aan die aansluiten op de merged-structuur.
+    reserveringen["Klantnaam"] = reserveringen["Debiteurnaam"] if "Debiteurnaam" in reserveringen.columns else ""
+    reserveringen["Nummer"] = reserveringen["Ordernummer"].astype(str)
+    reserveringen["Leverdatum"] = pd.to_datetime(reserveringen["Leverdatum_reservering_basis"], errors="coerce")
+    reserveringen["Datum"] = reserveringen["Datum_verzending"]
+    reserveringen["Status"] = "Reservering"
+    reserveringen["Verzinkstatus"] = "Niet verzinkt"
+    reserveringen["Gewicht"] = reserveringen["Gewicht_order_kg"]
+    reserveringen["Gewicht_export_kg"] = np.nan
     reserveringen["Gewicht_2g_verdeeld_kg"] = reserveringen["Gewicht_order_kg"]
-    reserveringen["Gewicht_effectief_kg"]   = reserveringen["Gewicht_order_kg"]
-    reserveringen["Gewicht_bron"]           = "Reservering"
-    reserveringen["Ordernummer_base"]       = reserveringen["Ordernummer"]
-    reserveringen["Regels_per_order"]       = 1
+    reserveringen["Gewicht_effectief_kg"] = reserveringen["Gewicht_order_kg"]
+    reserveringen["Gewicht_bron"] = "Reservering"
+    reserveringen["Ordernummer_base"] = reserveringen["Ordernummer"]
+    reserveringen["Regels_per_order"] = 1
     if "Debiteurnaam" in order.columns:
-        reserveringen["Debiteurnaam"] = reserveringen["Debiteurnaam"] if "Debiteurnaam" in reserveringen.columns else order.loc[reserveringen.index, "Debiteurnaam"] if "Debiteurnaam" in order.columns else ""
-    reserveringen["Bronbestand"]            = "OrderExport2G.xlsx"
-    reserveringen["Bron_week"]              = "reservering"
+        reserveringen["Debiteurnaam"] = reserveringen["Debiteurnaam"] if "Debiteurnaam" in reserveringen.columns else ""
+    reserveringen["Bronbestand"] = "OrderExport2G.xlsx"
+    reserveringen["Bron_week"] = "reservering"
 
     return reserveringen
 
@@ -471,6 +514,21 @@ def add_workdays(d: pd.Timestamp, days: int, holiday_dates: set) -> pd.Timestamp
     return out
 
 
+
+def add_workdays_existing_orders(d: pd.Timestamp, days: int) -> pd.Timestamp:
+    """
+    Tel werkdagen vooruit voor bestaande/reserveringsorders.
+    Alleen weekenden worden uitgesloten; feestdagen worden in de capaciteitstabel
+    zichtbaar gemaakt met capaciteit 0.
+    """
+    out = pd.Timestamp(d).normalize()
+    remaining = int(days)
+    while remaining > 0:
+        out = out + timedelta(days=1)
+        if out.weekday() < 5:
+            remaining -= 1
+    return out
+
 def subtract_workdays_existing_orders(d: pd.Timestamp, days: int) -> pd.Timestamp:
     out = pd.Timestamp(d).normalize()
     remaining = int(days)
@@ -570,6 +628,14 @@ def build_dashboard_data(
     df["Verzinkdatum"] = df["Leverdatum"].apply(
         lambda x: subtract_workdays_existing_orders(x, offset) if pd.notna(x) else pd.NaT
     )
+
+    # Reserveringen krijgen een expliciete verzinkdatum volgens de businessregel:
+    # Leverdatum V - 2 werkdagen; als Leverdatum V leeg is: Datum verzending + 2 werkdagen.
+    # Die override voorkomt dat reserveringen per ongeluk via Leverdatum/Dag-offset opnieuw
+    # worden berekend.
+    if "Verzinkdatum_reservering" in df.columns:
+        override = pd.to_datetime(df["Verzinkdatum_reservering"], errors="coerce")
+        df.loc[override.notna(), "Verzinkdatum"] = override[override.notna()]
 
     start_ts = pd.Timestamp(startdatum).normalize()
     today_ts = pd.Timestamp(date.today()).normalize()

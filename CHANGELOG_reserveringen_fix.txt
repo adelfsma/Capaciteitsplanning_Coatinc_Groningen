@@ -1,0 +1,6 @@
+v2.3.1 reserveringen fix
+- Reserveringen alleen meenemen als Locatie V exact 'Coatinc Groningen' is na trimmen.
+- Lege of ontbrekende Locatie V wordt niet meegenomen.
+- Verzinkdatum reservering: Leverdatum V - 2 werkdagen.
+- Als Leverdatum V leeg is: Datum verzending + 2 werkdagen.
+- Reserveringen gebruiken een expliciete Verzinkdatum_reservering override in build_dashboard_data.
