@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.3.1"
+APP_VERSION = "v2.3.2"
 
 STATUS_MAP = {
     # Afgerond / opgehaald

@@ -1,0 +1,4 @@
+v2.3.2 filters gebruikte gegevens
+- In tabblad 'Gebruikte gegevens' filters toegevoegd op Status en Verzinkdatum.
+- Tabel toont alleen regels die aan de geselecteerde criteria voldoen.
+- Excel-download volgt dezelfde filters als de getoonde tabel.

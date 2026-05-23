@@ -144,25 +144,78 @@ with tab2:
     relevant_cols = ["Bronbestand","Bron_week","Nummer","Ordernummer_base","Klantnaam","Status","Verzinkstatus","Meegeteld_in_planning","Reden_uitsluiting","Datum","Leverdatum","Verzinkdatum","Gewicht","Gewicht_export_kg","Gewicht_order_kg","Regels_per_order","Gewicht_2g_verdeeld_kg","Gewicht_bron","Gewicht_effectief_kg"]
     relevant_cols = [c for c in relevant_cols if c in df.columns]
     controle_df = df[relevant_cols].copy() if toon_alle_regels else df_plan[relevant_cols].copy()
-    if "Datum" in controle_df.columns:
-        controle_df["Datum"] = pd.to_datetime(controle_df["Datum"], errors="coerce").dt.date
-    if "Leverdatum" in controle_df.columns:
-        controle_df["Leverdatum"] = pd.to_datetime(controle_df["Leverdatum"], errors="coerce").dt.date
+
+    # Houd een interne datumkolom beschikbaar voor filtering, voordat we naar display-format omzetten.
     if "Verzinkdatum" in controle_df.columns:
-        controle_df["Verzinkdatum"] = pd.to_datetime(controle_df["Verzinkdatum"], errors="coerce").dt.date
+        controle_df["_Verzinkdatum_filter"] = pd.to_datetime(controle_df["Verzinkdatum"], errors="coerce")
+
+    st.markdown("### Filters")
+    filter_col1, filter_col2, filter_col3 = st.columns([1.2, 1, 1])
+
+    with filter_col1:
+        if "Status" in controle_df.columns:
+            status_options = sorted([str(x) for x in controle_df["Status"].dropna().unique()])
+            selected_status = st.multiselect(
+                "Status",
+                options=status_options,
+                default=status_options,
+                help="Selecteer één of meerdere statussen. Alleen regels met deze status worden getoond.",
+            )
+        else:
+            selected_status = []
+
+    with filter_col2:
+        if "_Verzinkdatum_filter" in controle_df.columns and controle_df["_Verzinkdatum_filter"].notna().any():
+            min_verzinkdatum = controle_df["_Verzinkdatum_filter"].min().date()
+            max_verzinkdatum = controle_df["_Verzinkdatum_filter"].max().date()
+            verzinkdatum_van = st.date_input("Verzinkdatum vanaf", value=min_verzinkdatum)
+        else:
+            verzinkdatum_van = None
+
+    with filter_col3:
+        if "_Verzinkdatum_filter" in controle_df.columns and controle_df["_Verzinkdatum_filter"].notna().any():
+            verzinkdatum_tot = st.date_input("Verzinkdatum t/m", value=max_verzinkdatum)
+        else:
+            verzinkdatum_tot = None
+
+    filtered_df = controle_df.copy()
+
+    if "Status" in filtered_df.columns and selected_status:
+        filtered_df = filtered_df[filtered_df["Status"].astype(str).isin(selected_status)]
+
+    if "_Verzinkdatum_filter" in filtered_df.columns:
+        if verzinkdatum_van is not None:
+            filtered_df = filtered_df[filtered_df["_Verzinkdatum_filter"].dt.date >= verzinkdatum_van]
+        if verzinkdatum_tot is not None:
+            filtered_df = filtered_df[filtered_df["_Verzinkdatum_filter"].dt.date <= verzinkdatum_tot]
+
+    st.caption(f"Getoonde regels: {len(filtered_df):,}".replace(",", "."))
+
+    display_df = filtered_df.copy()
+    if "Datum" in display_df.columns:
+        display_df["Datum"] = pd.to_datetime(display_df["Datum"], errors="coerce").dt.date
+    if "Leverdatum" in display_df.columns:
+        display_df["Leverdatum"] = pd.to_datetime(display_df["Leverdatum"], errors="coerce").dt.date
+    if "Verzinkdatum" in display_df.columns:
+        display_df["Verzinkdatum"] = pd.to_datetime(display_df["Verzinkdatum"], errors="coerce").dt.date
     for c in ["Gewicht_export_kg","Gewicht_order_kg","Gewicht_2g_verdeeld_kg","Gewicht_effectief_kg"]:
-        if c in controle_df.columns:
-            controle_df[c] = controle_df[c].round(2)
-    st.dataframe(controle_df, width="stretch", hide_index=True)
+        if c in display_df.columns:
+            display_df[c] = display_df[c].round(2)
+
+    if "_Verzinkdatum_filter" in display_df.columns:
+        display_df = display_df.drop(columns=["_Verzinkdatum_filter"])
+
+    st.dataframe(display_df, width="stretch", hide_index=True)
 
     # ── xlsx-export ──────────────────────────────────────────────────────
+    # Export gebruikt dezelfde filters als de tabel op het scherm.
     import io
     xlsx_buffer = io.BytesIO()
     with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
-        controle_df.to_excel(writer, index=False, sheet_name="Gebruikte gegevens")
+        display_df.to_excel(writer, index=False, sheet_name="Gebruikte gegevens")
     xlsx_buffer.seek(0)
     st.download_button(
-        label="📥 Download als Excel (.xlsx)",
+        label="📥 Download gefilterde tabel als Excel (.xlsx)",
         data=xlsx_buffer,
         file_name=f"capaciteitsplanning_export_{date.today().strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
