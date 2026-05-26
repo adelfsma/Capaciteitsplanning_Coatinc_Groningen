@@ -31,6 +31,8 @@ STATUS_MAP = {
     # Overig
     "meetrapport": "Verzinkt",              # administratief, geen capaciteitsimpact
     "Niet gezien": "Niet verzinkt",         # aanwezig maar nog niet ingepland
+    "Binnengemeld": "Niet verzinkt",         # materiaal aangemeld, nog niet verzinkt
+    "Gelost": "Niet verzinkt",               # materiaal gelost/ontvangen, nog niet verzinkt
 }
 
 NL_DAY_ABBR = {0: "ma", 1: "di", 2: "wo", 3: "do", 4: "vr", 5: "za", 6: "zo"}
