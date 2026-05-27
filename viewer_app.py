@@ -145,6 +145,11 @@ with tab2:
     relevant_cols = [c for c in relevant_cols if c in df.columns]
     controle_df = df[relevant_cols].copy() if toon_alle_regels else df_plan[relevant_cols].copy()
 
+    if "Verzinkstatus" in controle_df.columns:
+        opties = controle_df["Verzinkstatus"].dropna().unique().tolist()
+        selectie = st.multiselect("Filter op verzinkstatus", opties, default=opties)
+        controle_df = controle_df[controle_df["Verzinkstatus"].isin(selectie)]
+
     # Houd een interne datumkolom beschikbaar voor filtering, voordat we naar display-format omzetten.
     if "Verzinkdatum" in controle_df.columns:
         controle_df["_Verzinkdatum_filter"] = pd.to_datetime(controle_df["Verzinkdatum"], errors="coerce")
