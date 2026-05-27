@@ -145,17 +145,12 @@ with tab2:
     relevant_cols = [c for c in relevant_cols if c in df.columns]
     controle_df = df[relevant_cols].copy() if toon_alle_regels else df_plan[relevant_cols].copy()
 
-    if "Verzinkstatus" in controle_df.columns:
-        opties = controle_df["Verzinkstatus"].dropna().unique().tolist()
-        selectie = st.multiselect("Filter op verzinkstatus", opties, default=opties)
-        controle_df = controle_df[controle_df["Verzinkstatus"].isin(selectie)]
-
     # Houd een interne datumkolom beschikbaar voor filtering, voordat we naar display-format omzetten.
     if "Verzinkdatum" in controle_df.columns:
         controle_df["_Verzinkdatum_filter"] = pd.to_datetime(controle_df["Verzinkdatum"], errors="coerce")
 
     st.markdown("### Filters")
-    filter_col1, filter_col2, filter_col3 = st.columns([1.2, 1, 1])
+    filter_col1, filter_col2, filter_col3, filter_col4 = st.columns([1.2, 1, 1, 1])
 
     with filter_col1:
         if "Status" in controle_df.columns:
@@ -183,10 +178,24 @@ with tab2:
         else:
             verzinkdatum_tot = None
 
+    with filter_col4:
+        if "Verzinkstatus" in controle_df.columns:
+            verzinkstatus_opties = sorted([str(x) for x in controle_df["Verzinkstatus"].dropna().unique()])
+            selected_verzinkstatus = st.multiselect(
+                "Verzinkstatus",
+                options=verzinkstatus_opties,
+                default=verzinkstatus_opties,
+            )
+        else:
+            selected_verzinkstatus = []
+
     filtered_df = controle_df.copy()
 
     if "Status" in filtered_df.columns and selected_status:
         filtered_df = filtered_df[filtered_df["Status"].astype(str).isin(selected_status)]
+
+    if "Verzinkstatus" in filtered_df.columns and selected_verzinkstatus:
+        filtered_df = filtered_df[filtered_df["Verzinkstatus"].astype(str).isin(selected_verzinkstatus)]
 
     if "_Verzinkdatum_filter" in filtered_df.columns:
         if verzinkdatum_van is not None:
