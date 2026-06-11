@@ -283,13 +283,22 @@ def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataF
         return pd.DataFrame()
 
     # Bereken verzinkdatum voor reserveringen volgens aangepaste businessregel.
+    # Depot Amsterdam (Aanleveren depot=1): Leverdatum V - 1 / Datum verzending + 1
+    # Overig         (Aanleveren depot=0): Leverdatum V - 2 / Datum verzending + 3
+    def _calc_reservering_verzinkdatum(r):
+        is_depot = int(r.get("Aanleveren depot", 0)) == 1
+        if pd.notna(r["Leverdatum_V"]):
+            return subtract_workdays_existing_orders(
+                r["Leverdatum_V"], 1 if is_depot else 2
+            )
+        if pd.notna(r["Datum_verzending"]):
+            return add_workdays_existing_orders(
+                r["Datum_verzending"], 1 if is_depot else 3
+            )
+        return pd.NaT
+
     reserveringen["Verzinkdatum_reservering"] = reserveringen.apply(
-        lambda r: subtract_workdays_existing_orders(r["Leverdatum_V"], 2)
-        if pd.notna(r["Leverdatum_V"])
-        else add_workdays_existing_orders(r["Datum_verzending"], 2)
-        if pd.notna(r["Datum_verzending"])
-        else pd.NaT,
-        axis=1,
+        _calc_reservering_verzinkdatum, axis=1
     )
 
     # Voor display en aansluiting op bestaande structuur:
@@ -297,7 +306,7 @@ def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataF
     reserveringen["Leverdatum_reservering_basis"] = np.where(
         reserveringen["Leverdatum_V"].notna(),
         reserveringen["Leverdatum_V"],
-        reserveringen["Datum_verzending"],
+        reserveringen["Verzinkdatum_reservering"],  # niet Datum_verzending; voorkomt Verzinkdatum > Leverdatum
     )
 
     # Maak kolommen aan die aansluiten op de merged-structuur.
@@ -417,6 +426,8 @@ def load_published_data():
     order_merge_cols = ["Ordernummer", "Gewicht_order_kg"]
     if "Debiteurnaam" in order.columns:
         order_merge_cols.append("Debiteurnaam")
+    if "Aanleveren depot" in order.columns:
+        order_merge_cols.append("Aanleveren depot")
     merged = merged.merge(
         order[order_merge_cols],
         left_on="Ordernummer_base",
@@ -627,8 +638,16 @@ def build_dashboard_data(
     holiday_dates = set(holiday_df["Datum"].tolist())
     df = df_raw.copy()
 
-    df["Verzinkdatum"] = df["Leverdatum"].apply(
-        lambda x: subtract_workdays_existing_orders(x, offset) if pd.notna(x) else pd.NaT
+    # Verzinkdatum: depot Amsterdam (Aanleveren depot=1) → -1 werkdag, overig → sidebar offset
+    def _row_offset(row):
+        if pd.notna(row.get("Aanleveren depot")) and int(row["Aanleveren depot"]) == 1:
+            return 1
+        return offset
+
+    df["Verzinkdatum"] = df.apply(
+        lambda row: subtract_workdays_existing_orders(row["Leverdatum"], _row_offset(row))
+        if pd.notna(row["Leverdatum"]) else pd.NaT,
+        axis=1,
     )
 
     # Reserveringen krijgen een expliciete verzinkdatum volgens de businessregel:
