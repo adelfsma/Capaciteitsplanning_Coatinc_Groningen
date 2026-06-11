@@ -84,7 +84,7 @@ if meta:
 
 st.title("Capaciteitsplanning Coatinc Groningen")
 st.sidebar.header("Instellingen")
-capaciteit_ton = st.sidebar.slider("Max capaciteit per dag (ton)", 50, 90, 70, 5)
+capaciteit_ton = st.sidebar.slider("Max capaciteit per dag (ton)", 50, 90, 60, 5)
 capaciteit_kg = capaciteit_ton * 1000
 offset = st.sidebar.selectbox("Verzinkdatum = leverdatum - X werkdagen", [1, 2, 3, 4], index=1)
 kg_per_traverse = st.sidebar.number_input("KG per traverse", min_value=100, max_value=10000, value=1000, step=100)
@@ -141,7 +141,7 @@ with tab1:
 
 with tab2:
     st.subheader("Gebruikte gegevens / controletabel")
-    relevant_cols = ["Bronbestand","Bron_week","Nummer","Ordernummer_base","Klantnaam","Gewicht_effectief_kg","Status","Verzinkstatus","Meegeteld_in_planning","Reden_uitsluiting","Datum","Leverdatum","Verzinkdatum","Gewicht","Gewicht_export_kg","Gewicht_order_kg","Regels_per_order","Gewicht_2g_verdeeld_kg","Gewicht_bron"]
+    relevant_cols = ["Bronbestand","Bron_week","Nummer","Ordernummer_base","Klantnaam","Gewicht_effectief_kg","Status","Verzinkstatus","Meegeteld_in_planning","Reden_uitsluiting","Datum","Leverdatum","Verzinkdatum","Aanleveren depot","Gewicht","Gewicht_export_kg","Gewicht_order_kg","Regels_per_order","Gewicht_2g_verdeeld_kg","Gewicht_bron"]
     relevant_cols = [c for c in relevant_cols if c in df.columns]
     controle_df = df[relevant_cols].copy() if toon_alle_regels else df_plan[relevant_cols].copy()
 

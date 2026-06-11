@@ -288,13 +288,15 @@ def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataF
     def _calc_reservering_verzinkdatum(r):
         is_depot = int(r.get("Aanleveren depot", 0)) == 1
         if pd.notna(r["Leverdatum_V"]):
-            return subtract_workdays_existing_orders(
-                r["Leverdatum_V"], 1 if is_depot else 2
-            )
+            if is_depot:
+                return subtract_workdays_existing_orders(r["Leverdatum_V"], 1)
+            else:
+                return pd.NaT  # geen override → build_dashboard_data gebruikt sidebar offset
         if pd.notna(r["Datum_verzending"]):
-            return add_workdays_existing_orders(
-                r["Datum_verzending"], 1 if is_depot else 3
-            )
+            if is_depot:
+                return add_workdays_existing_orders(r["Datum_verzending"], 1)
+            else:
+                return pd.NaT  # geen override → Leverdatum=DV+5, dan sidebar offset
         return pd.NaT
 
     reserveringen["Verzinkdatum_reservering"] = reserveringen.apply(
@@ -303,10 +305,20 @@ def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataF
 
     # Voor display en aansluiting op bestaande structuur:
     # Leverdatum = Leverdatum V indien gevuld, anders Datum verzending.
-    reserveringen["Leverdatum_reservering_basis"] = np.where(
-        reserveringen["Leverdatum_V"].notna(),
-        reserveringen["Leverdatum_V"],
-        reserveringen["Verzinkdatum_reservering"],  # niet Datum_verzending; voorkomt Verzinkdatum > Leverdatum
+    def _calc_leverdatum_basis(r):
+        if pd.notna(r["Leverdatum_V"]):
+            return r["Leverdatum_V"]
+        is_depot = int(r.get("Aanleveren depot", 0)) == 1
+        if pd.notna(r["Datum_verzending"]):
+            # Depot=1: Leverdatum = DV + 2 werkdagen
+            # Depot=0: Leverdatum = DV + 5 werkdagen
+            return add_workdays_existing_orders(
+                r["Datum_verzending"], 2 if is_depot else 5
+            )
+        return pd.NaT
+
+    reserveringen["Leverdatum_reservering_basis"] = reserveringen.apply(
+        _calc_leverdatum_basis, axis=1
     )
 
     # Maak kolommen aan die aansluiten op de merged-structuur.
@@ -428,6 +440,10 @@ def load_published_data():
         order_merge_cols.append("Debiteurnaam")
     if "Aanleveren depot" in order.columns:
         order_merge_cols.append("Aanleveren depot")
+    # Leverdatum V meenemen zodat depot-orders de juiste leverdatum krijgen
+    if "Leverdatum V" in order.columns:
+        order["Leverdatum_V_2G"] = pd.to_datetime(order["Leverdatum V"], dayfirst=True, errors="coerce")
+        order_merge_cols.append("Leverdatum_V_2G")
     merged = merged.merge(
         order[order_merge_cols],
         left_on="Ordernummer_base",
@@ -449,6 +465,17 @@ def load_published_data():
         merged["Klantnaam"] = merged["Debiteurnaam"]
     else:
         merged["Klantnaam"] = ""
+
+    # ── Coatinc 24 Amsterdam altijd als depot behandelen ─────────────────
+    if "Klantnaam" in merged.columns and "Aanleveren depot" in merged.columns:
+        is_c24 = merged["Klantnaam"].astype(str).str.contains(
+            "Coatinc 24 Amsterdam", case=False, na=False
+        )
+        merged.loc[is_c24, "Aanleveren depot"] = 1
+
+    # Leverdatum voor export-orders = Datum uit Export-bestanden (ongewijzigd).
+    # Leverdatum voor reserveringen = Leverdatum V uit OrderExport2G
+    # (wordt afgehandeld in _build_reserveringen).
 
     merged["Gewicht_bron"] = np.where(
         merged["Gewicht_export_kg"].fillna(0) > 0,
