@@ -35,6 +35,19 @@ STATUS_MAP = {
     "Gelost": "Niet verzinkt",               # materiaal gelost/ontvangen, nog niet verzinkt
 }
 
+# ── Zwarte voorraad (KPI) ───────────────────────────────────────────────────
+# Mapping van de ruwe Status-waarde naar de subcategorie die meetelt in de
+# KPI "Totale zwarte voorraad". Deze KPI is de som van de twee subcategorieën
+# hieronder. Statussen die hier niet in voorkomen tellen niet mee (o.a. alles
+# wat al verzinkt/UB is, en Reserveringen).
+ZWARTE_VOORRAAD_MAP = {
+    "Productie gereed":        "Productie gereed",
+    "Voorbewerking uitvoeren": "Binnengemeld/Voorbewerking/Geblokkeerd",
+    "Binnengemeld":            "Binnengemeld/Voorbewerking/Geblokkeerd",
+    "Geblokkeerd":             "Binnengemeld/Voorbewerking/Geblokkeerd",
+    "Gelost":                  "Binnengemeld/Voorbewerking/Geblokkeerd",
+}
+
 NL_DAY_ABBR = {0: "ma", 1: "di", 2: "wo", 3: "do", 4: "vr", 5: "za", 6: "zo"}
 
 REQUIRED_FILES = [
@@ -664,6 +677,9 @@ def build_dashboard_data(
 ):
     holiday_dates = set(holiday_df["Datum"].tolist())
     df = df_raw.copy()
+
+    # Zwarte voorraad: subcategorie o.b.v. Status, ongeacht planningshorizon.
+    df["Zwarte_voorraad_categorie"] = df["Status"].map(ZWARTE_VOORRAAD_MAP)
 
     # Verzinkdatum: depot Amsterdam (Aanleveren depot=1) → -1 werkdag, overig → sidebar offset
     def _row_offset(row):

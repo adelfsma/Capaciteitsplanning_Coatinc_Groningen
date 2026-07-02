@@ -110,6 +110,25 @@ with tab1:
         st.metric("Aantal orders te verzinken", f"{aantal_orders_te_verzinken:,}".replace(",", "."))
     with k2:
         st.metric("Totaal KG te verzinken", f"{int(round(totaal_kg_te_verzinken, 0)):,}".replace(",", "."))
+
+    # Zwarte voorraad: momentopname o.b.v. Status, los van de planningshorizon.
+    # "Totale zwarte voorraad" = som van de twee subcategorieën hieronder.
+    kg_productie_gereed = float(
+        df.loc[df["Zwarte_voorraad_categorie"] == "Productie gereed", "Gewicht_effectief_kg"].sum()
+    )
+    kg_voorbewerking_geblokkeerd = float(
+        df.loc[df["Zwarte_voorraad_categorie"] == "Binnengemeld/Voorbewerking/Geblokkeerd", "Gewicht_effectief_kg"].sum()
+    )
+    kg_totale_zwarte_voorraad = kg_productie_gereed + kg_voorbewerking_geblokkeerd
+
+    zv1, zv2, zv3 = st.columns(3)
+    with zv1:
+        st.metric("Totale zwarte voorraad (kg)", format_int(kg_totale_zwarte_voorraad))
+    with zv2:
+        st.metric("Waarvan Productie gereed (kg)", format_int(kg_productie_gereed))
+    with zv3:
+        st.metric("Waarvan Binnengemeld/Voorbewerking/Geblokkeerd (kg)", format_int(kg_voorbewerking_geblokkeerd))
+
     st.subheader("Eerstvolgende leverdatum")
     st.markdown(f'<div style="padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid #d0d7de; background-color: #f6f8fa; margin-bottom: 0.75rem;"><div style="font-size: 2.2rem; font-weight: 700;">{advies_datum.strftime("%d-%m-%Y")}</div></div>', unsafe_allow_html=True)
     st.pyplot(make_professional_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
