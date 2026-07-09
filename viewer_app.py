@@ -5,7 +5,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from shared import APP_VERSION, MATERIAALTYPE_ORDER, MATERIAALTYPE_DAG_COLS, previous_workday, load_published_data, load_metadata, build_dashboard_data, format_int, format_pct, render_environment_banner, get_page_title
+from shared import (
+    APP_VERSION,
+    MATERIAALTYPE_ORDER,
+    MATERIAALTYPE_DAG_COLS,
+    WITTE_VOORRAAD_STATUSSEN,
+    previous_workday,
+    load_published_data,
+    load_metadata,
+    build_dashboard_data,
+    format_int,
+    format_pct,
+    render_environment_banner,
+    get_page_title,
+)
 
 st.set_page_config(layout="wide", page_title=get_page_title("Capaciteitsplanning Coatinc Groningen"))
 
@@ -186,14 +199,7 @@ df, df_plan, dag, week, advies_datum = build_dashboard_data(df_raw, holiday_df, 
 tab1, tab2, tab3 = st.tabs(["Dashboard", "Gebruikte gegevens", "Debug"])
 
 with tab1:
-    st.subheader("KPI-overzicht")
-    k1, k2 = st.columns(2)
-    aantal_orders_te_verzinken = int((df["Meegeteld_in_planning"] == "Ja").sum())
-    totaal_kg_te_verzinken = float(df_plan["Gewicht_effectief_kg"].sum()) if len(df_plan) > 0 else 0.0
-    with k1:
-        st.metric("Aantal orders te verzinken", f"{aantal_orders_te_verzinken:,}".replace(",", "."))
-    with k2:
-        st.metric("Totaal KG te verzinken", f"{int(round(totaal_kg_te_verzinken, 0)):,}".replace(",", "."))
+    st.subheader("Voorraadoverzicht")
 
     # Zwarte voorraad: momentopname o.b.v. Status, los van de planningshorizon.
     # "Totale zwarte voorraad" = som van de twee subcategorieën hieronder.
@@ -205,13 +211,74 @@ with tab1:
     )
     kg_totale_zwarte_voorraad = kg_productie_gereed + kg_voorbewerking_geblokkeerd
 
-    zv1, zv2, zv3 = st.columns(3)
-    with zv1:
-        st.metric("Totale zwarte voorraad (kg)", format_int(kg_totale_zwarte_voorraad))
-    with zv2:
-        st.metric("Waarvan Productie gereed (kg)", format_int(kg_productie_gereed))
-    with zv3:
-        st.metric("Waarvan Binnengemeld/Voorbewerking/Geblokkeerd (kg)", format_int(kg_voorbewerking_geblokkeerd))
+    # Witte voorraad: statussen die al afgehandeld/verzinkt zijn, maar nog als
+    # voorraadstroom zichtbaar moeten zijn. Matching bewust case-insensitive.
+    witte_statussen_norm = {str(s).strip().casefold() for s in WITTE_VOORRAAD_STATUSSEN}
+    status_norm = df["Status"].astype(str).str.strip().str.casefold() if "Status" in df.columns else pd.Series([], dtype=str)
+    kg_witte_voorraad = float(
+        df.loc[status_norm.isin(witte_statussen_norm), "Gewicht_effectief_kg"].sum()
+    ) if "Status" in df.columns else 0.0
+
+    st.markdown(
+        f"""
+        <style>
+        .cgr-stock-grid {{
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 1rem;
+            margin: 0.25rem 0 1.2rem 0;
+        }}
+        .cgr-stock-card {{
+            border: 1px solid #d0d7de;
+            border-radius: 14px;
+            padding: 1.05rem 1.15rem;
+            background: #ffffff;
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+        }}
+        .cgr-stock-card-accent-black {{ border-left: 8px solid #1f2937; }}
+        .cgr-stock-card-accent-white {{ border-left: 8px solid #94a3b8; }}
+        .cgr-stock-label {{
+            font-size: 0.95rem;
+            color: #475569;
+            font-weight: 650;
+            margin-bottom: 0.25rem;
+        }}
+        .cgr-stock-value {{
+            font-size: 2.15rem;
+            line-height: 1.12;
+            color: #111827;
+            font-weight: 750;
+            margin-bottom: 0.7rem;
+        }}
+        .cgr-stock-detail {{
+            font-size: 0.9rem;
+            color: #475569;
+            line-height: 1.45;
+        }}
+        @media (max-width: 900px) {{
+            .cgr-stock-grid {{ grid-template-columns: 1fr; }}
+        }}
+        </style>
+        <div class="cgr-stock-grid">
+            <div class="cgr-stock-card cgr-stock-card-accent-black">
+                <div class="cgr-stock-label">Zwarte voorraad (kg)</div>
+                <div class="cgr-stock-value">{format_int(kg_totale_zwarte_voorraad)}</div>
+                <div class="cgr-stock-detail">
+                    Productie gereed: <strong>{format_int(kg_productie_gereed)}</strong> kg<br>
+                    Binnengemeld / voorbewerking / geblokkeerd: <strong>{format_int(kg_voorbewerking_geblokkeerd)}</strong> kg
+                </div>
+            </div>
+            <div class="cgr-stock-card cgr-stock-card-accent-white">
+                <div class="cgr-stock-label">Witte voorraad (kg)</div>
+                <div class="cgr-stock-value">{format_int(kg_witte_voorraad)}</div>
+                <div class="cgr-stock-detail">
+                    Statussen: Afgehaald, Nabewerking nog uitvoeren, PC Afgehaald en Coat gereed
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.subheader("Eerstvolgende leverdatum")
     st.markdown(f'<div style="padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid #d0d7de; background-color: #f6f8fa; margin-bottom: 0.75rem;"><div style="font-size: 2.2rem; font-weight: 700;">{advies_datum.strftime("%d-%m-%Y")}</div></div>', unsafe_allow_html=True)

@@ -42,7 +42,7 @@ Optionele bestanden:
 - debtor-export.xlsx
 
 
-Aanvulling v2.4.2
+Aanvulling v2.4.3
 - TEST-markering is nu conditioneel gemaakt via Streamlit Secrets.
 - Dezelfde code kan veilig op Test en Main draaien.
 - Alleen apps met [app] environment = "test" tonen de grote TEST-banner, [TEST] in de browser-tab en de extra waarschuwing in beheer.
@@ -68,3 +68,9 @@ key = "..."
 bucket = "..."
 
 Als [app] environment ontbreekt, wordt de app behandeld als productie en wordt geen TEST-banner getoond.
+
+
+Wijzigingen v2.4.3:
+- KPI-overzicht bovenin vervangen door een rustiger Voorraadoverzicht.
+- Totaal aantal orders en totaal KG te verzinken verwijderd uit het bovenste dashboarddeel.
+- Witte voorraad toegevoegd: som van gewichten met status Afgehaald, Nabewerking nog uitvoeren, PC Afgehaald en Coat gereed.

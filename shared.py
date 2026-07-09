@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.4.2"
+APP_VERSION = "v2.4.3"
 
 
 def get_app_environment() -> str:
@@ -112,6 +112,16 @@ ZWARTE_VOORRAAD_MAP = {
     "Binnengemeld":            "Binnengemeld/Voorbewerking/Geblokkeerd",
     "Geblokkeerd":             "Binnengemeld/Voorbewerking/Geblokkeerd",
     "Gelost":                  "Binnengemeld/Voorbewerking/Geblokkeerd",
+}
+
+# Witte voorraad (KPI): materiaal dat al verzinkt/gereed is, maar administratief
+# of logistiek nog in de voorraadstroom zit. De matching in de viewer gebeurt
+# case-insensitive, zodat varianten als "coat gereed" en "Coat gereed" meetellen.
+WITTE_VOORRAAD_STATUSSEN = {
+    "Afgehaald",
+    "Nabewerking nog uitvoeren",
+    "PC Afgehaald",
+    "Coat gereed",
 }
 
 NL_DAY_ABBR = {0: "ma", 1: "di", 2: "wo", 3: "do", 4: "vr", 5: "za", 6: "zo"}
