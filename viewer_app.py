@@ -88,8 +88,8 @@ def make_materiaaltype_matplotlib_chart(day_df: pd.DataFrame):
     is_holiday = plot_df["Is_feestdag_of_sluiting"].tolist()
 
     colors = {
-        "Constructie": "#2E75B6",
-        "Maatwerk": "#70AD47",
+        "Constructie": "#70AD47",
+        "Maatwerk": "#2E75B6",
         "Seriewerk": "#8064A2",
         "Overig / onbekend": "#A6A6A6",
     }
