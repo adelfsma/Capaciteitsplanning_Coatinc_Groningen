@@ -42,12 +42,29 @@ Optionele bestanden:
 - debtor-export.xlsx
 
 
-Aanvulling v2.4.1-test
-- Grote rode TEST-markering toegevoegd aan viewer_app.py en manager_app.py.
-- Browser-tab titel begint met [TEST].
-- Sidebar toont ook TESTOMGEVING.
-- Manager toont een extra waarschuwing bij gedeelde bucket/secrets.
+Aanvulling v2.4.2
+- TEST-markering is nu conditioneel gemaakt via Streamlit Secrets.
+- Dezelfde code kan veilig op Test en Main draaien.
+- Alleen apps met [app] environment = "test" tonen de grote TEST-banner, [TEST] in de browser-tab en de extra waarschuwing in beheer.
 
-Let op bij promotie naar main:
-- Deze TEST-markering staat bewust in de Test-branch.
-- Zet APP_ENVIRONMENT in shared.py niet op TEST in productie/main.
+Benodigde Secrets per omgeving:
+
+Voor Test-viewer en Test-beheer:
+[app]
+environment = "test"
+
+[supabase]
+url = "..."
+key = "..."
+bucket = "..."
+
+Voor Main-viewer en Main-beheer:
+[app]
+environment = "production"
+
+[supabase]
+url = "..."
+key = "..."
+bucket = "..."
+
+Als [app] environment ontbreekt, wordt de app behandeld als productie en wordt geen TEST-banner getoond.

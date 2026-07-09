@@ -5,9 +5,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from shared import APP_VERSION, MATERIAALTYPE_ORDER, MATERIAALTYPE_DAG_COLS, previous_workday, load_published_data, load_metadata, build_dashboard_data, format_int, format_pct, render_environment_banner
+from shared import APP_VERSION, MATERIAALTYPE_ORDER, MATERIAALTYPE_DAG_COLS, previous_workday, load_published_data, load_metadata, build_dashboard_data, format_int, format_pct, render_environment_banner, get_page_title
 
-st.set_page_config(layout="wide", page_title="[TEST] Capaciteitsplanning Coatinc Groningen")
+st.set_page_config(layout="wide", page_title=get_page_title("Capaciteitsplanning Coatinc Groningen"))
 
 def make_professional_matplotlib_chart(day_df: pd.DataFrame):
     plot_df = day_df.copy()

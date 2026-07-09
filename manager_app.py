@@ -19,11 +19,13 @@ from shared import (
     validate_required_files_in_folder,
     validate_debtor_export_xlsx,
     render_environment_banner,
+    get_page_title,
+    is_test_environment,
 )
 from pathlib import Path
 import tempfile
 
-st.set_page_config(layout="wide", page_title="[TEST] Capaciteitsplanning Coatinc Groningen - Beheer")
+st.set_page_config(layout="wide", page_title=get_page_title("Capaciteitsplanning Coatinc Groningen - Beheer"))
 
 if os.path.exists("logo_coatinc_groningen.png"):
     st.sidebar.image("logo_coatinc_groningen.png", use_container_width=True)
@@ -36,7 +38,8 @@ if password != "coatinc2026":
 
 st.title("Capaciteitsplanning Coatinc Groningen – Beheer")
 st.caption("Upload per bestand en publiceer daarna de volledige dataset voor alle kijkers.")
-st.warning("Let op: dit is de TEST-beheeromgeving. Controleer de bucket/secrets en publiceer alleen bewust bestanden. Als Test dezelfde bucket gebruikt als Main, schrijf je naar dezelfde dataopslag.")
+if is_test_environment():
+    st.warning("Let op: dit is de TEST-beheeromgeving. Controleer de bucket/secrets en publiceer alleen bewust bestanden. Als Test dezelfde bucket gebruikt als Main, schrijf je naar dezelfde dataopslag.")
 
 # ── Laatste publicatie ─────────────────────────────────────────────────────────
 meta = load_metadata()

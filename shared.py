@@ -8,18 +8,46 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.4.1-test"
-APP_ENVIRONMENT = "TEST"
+APP_VERSION = "v2.4.2"
+
+
+def get_app_environment() -> str:
+    """Lees de app-omgeving uit Streamlit Secrets.
+
+    Verwachte configuratie in Streamlit Cloud:
+
+    [app]
+    environment = "test"        # toont TEST-banner
+
+    of:
+
+    [app]
+    environment = "production"  # geen TEST-banner
+
+    Ontbreekt deze instelling, dan gedraagt de app zich als productie en wordt
+    er geen TEST-banner getoond.
+    """
+    try:
+        app_cfg = st.secrets.get("app", {})
+        value = app_cfg.get("environment", "") if hasattr(app_cfg, "get") else ""
+    except Exception:
+        value = ""
+    return str(value).strip().lower()
+
+
+def is_test_environment() -> bool:
+    """True als de app expliciet als testomgeving is ingesteld."""
+    return get_app_environment() in {"test", "testing", "acceptatie", "staging"}
+
+
+def get_page_title(base_title: str) -> str:
+    """Voeg [TEST] toe aan de browser-tab als environment=test."""
+    return f"[TEST] {base_title}" if is_test_environment() else base_title
 
 
 def render_environment_banner(page_label: str = ""):
-    """Toon een duidelijke TEST-markering in de Streamlit-app.
-
-    Deze testmarkering staat bewust in de Test-branch. Als deze functionaliteit
-    later naar main wordt gepromoveerd, zet APP_ENVIRONMENT dan op "" of
-    verwijder deze markering uit de productiebranch.
-    """
-    if str(APP_ENVIRONMENT).strip().upper() != "TEST":
+    """Toon alleen een duidelijke TEST-markering als [app] environment='test'."""
+    if not is_test_environment():
         return
 
     suffix = f" – {page_label}" if page_label else ""
