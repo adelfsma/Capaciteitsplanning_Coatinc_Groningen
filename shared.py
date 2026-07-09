@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 from datetime import date, timedelta
 from pathlib import Path
@@ -7,7 +8,44 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.3.2"
+APP_VERSION = "v2.4.1-test"
+APP_ENVIRONMENT = "TEST"
+
+
+def render_environment_banner(page_label: str = ""):
+    """Toon een duidelijke TEST-markering in de Streamlit-app.
+
+    Deze testmarkering staat bewust in de Test-branch. Als deze functionaliteit
+    later naar main wordt gepromoveerd, zet APP_ENVIRONMENT dan op "" of
+    verwijder deze markering uit de productiebranch.
+    """
+    if str(APP_ENVIRONMENT).strip().upper() != "TEST":
+        return
+
+    suffix = f" – {page_label}" if page_label else ""
+    st.sidebar.error("🔴 TESTOMGEVING")
+    st.markdown(
+        f"""
+        <div style="
+            background: linear-gradient(90deg, #7f1d1d 0%, #dc2626 50%, #7f1d1d 100%);
+            color: white;
+            border: 4px solid #450a0a;
+            border-radius: 14px;
+            padding: 18px 24px;
+            margin: 0 0 18px 0;
+            text-align: center;
+            box-shadow: 0 4px 14px rgba(127, 29, 29, 0.25);
+        ">
+            <div style="font-size: 52px; line-height: 1; font-weight: 900; letter-spacing: 0.16em;">
+                TEST
+            </div>
+            <div style="font-size: 20px; font-weight: 700; margin-top: 8px; letter-spacing: 0.02em;">
+                TESTOMGEVING{suffix} — niet gebruiken als productieversie
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 STATUS_MAP = {
     # Afgerond / opgehaald
@@ -61,9 +99,24 @@ REQUIRED_FILES = [
     "feestdagen.xlsx",
 ]
 
-# Optioneel: CGS-planningsexport (verzinken productielijn)
+# Optioneel: CGS-planningsexport (verzinken productielijn) en debiteurenexport.
 # Als aanwezig, worden CGS-orders die NIET al in de weekexports zitten toegevoegd.
-OPTIONAL_FILES = ["Export_CGS.xlsx"]
+# Als debtor-export.xlsx aanwezig is, wordt het klantsegment/materialtype gekoppeld.
+DEBTOR_EXPORT_FILE = "debtor-export.xlsx"
+OPTIONAL_FILES = ["Export_CGS.xlsx", DEBTOR_EXPORT_FILE]
+
+OPTIONAL_FILE_LABELS = {
+    "Export_CGS.xlsx": "Upload Export_CGS.xlsx (optioneel – CGS verzinkplanning)",
+    DEBTOR_EXPORT_FILE: "Upload debtor-export.xlsx (optioneel – segment/type materiaal per klant)",
+}
+
+MATERIAALTYPE_ORDER = ["Constructie", "Maatwerk", "Seriewerk", "Overig / onbekend"]
+MATERIAALTYPE_DAG_COLS = {
+    "Constructie": "KG_Constructie",
+    "Maatwerk": "KG_Maatwerk",
+    "Seriewerk": "KG_Seriewerk",
+    "Overig / onbekend": "KG_Overig_onbekend",
+}
 
 # ── Reserveringen (Power BI Merge1-logica) ─────────────────────────────────────
 # Orders in OrderExport2G die nog NIET in de CGS-exports staan,
@@ -171,6 +224,151 @@ def publish_files(file_map: dict[str, bytes]) -> None:
 def _ensure_temp() -> Path:
     _TEMP_DIR.mkdir(parents=True, exist_ok=True)
     return _TEMP_DIR
+
+
+# ── Debtor segment / materiaaltype helpers ─────────────────────────────────────
+
+def normalize_materiaaltype(segment) -> str:
+    """
+    Normaliseer het klantsegment uit debtor-export naar de materiaaltype-indeling
+    die in het dashboard wordt getoond.
+    """
+    if pd.isna(segment):
+        return "Overig / onbekend"
+
+    s = str(segment).strip().lower()
+    if not s:
+        return "Overig / onbekend"
+    if "constructie" in s:
+        return "Constructie"
+    if "maatwerk" in s:
+        return "Maatwerk"
+    if "serie" in s:
+        return "Seriewerk"
+    return "Overig / onbekend"
+
+
+def _normalize_name_key(series: pd.Series) -> pd.Series:
+    """Maak een robuuste sleutel voor klantnamen."""
+    s = series.fillna("").astype(str).str.lower().str.strip()
+    s = s.str.replace(r"[^a-z0-9]+", " ", regex=True)
+    s = s.str.replace(r"\b(bv|b v|b\.v|b\.v\.|nv|n v|n\.v|holding|groep|group)\b", "", regex=True)
+    s = s.str.replace(r"\s+", " ", regex=True).str.strip()
+    return s
+
+
+def _normalize_number_key(series: pd.Series) -> pd.Series:
+    """Maak een robuuste sleutel voor debiteurnummers."""
+    numeric = coerce_numeric(series)
+    out = numeric.round(0).astype("Int64").astype(str)
+    return out.replace({"<NA>": ""})
+
+
+def _find_first_existing_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    exact = {c.lower().strip(): c for c in df.columns}
+    for candidate in candidates:
+        if candidate.lower().strip() in exact:
+            return exact[candidate.lower().strip()]
+    return None
+
+
+def validate_debtor_export_xlsx(file_path: Path) -> bool:
+    """Valideer de optionele debtor-export voor segmentkoppeling."""
+    try:
+        debtors = pd.read_excel(file_path, sheet_name="debtors", nrows=5)
+    except ValueError as e:
+        raise ValueError("debtor-export.xlsx moet een tabblad 'debtors' bevatten.") from e
+
+    required = {"number", "name", "segment"}
+    missing = required.difference(debtors.columns)
+    if missing:
+        raise ValueError(
+            "debtor-export.xlsx moet in tabblad 'debtors' de kolommen "
+            + ", ".join(sorted(required))
+            + " bevatten. Ontbrekend: "
+            + ", ".join(sorted(missing))
+        )
+    return True
+
+
+def _load_debtor_segment_lookup(tmp: Path) -> pd.DataFrame:
+    """
+    Lees debtor-export.xlsx en bouw een lookup op debiteurnummer en klantnaam.
+    Het bestand is optioneel: bij ontbreken blijven segmenten 'Overig / onbekend'.
+    """
+    debtor_path = tmp / DEBTOR_EXPORT_FILE
+    if not debtor_path.exists():
+        return pd.DataFrame()
+
+    validate_debtor_export_xlsx(debtor_path)
+    debtors = pd.read_excel(debtor_path, sheet_name="debtors")
+
+    lookup = debtors[["number", "name", "segment"]].copy()
+    lookup["Debiteurnummer_key"] = _normalize_number_key(lookup["number"])
+    lookup["Klantnaam_key"] = _normalize_name_key(lookup["name"])
+    lookup["Segment_debtor_export"] = lookup["segment"].fillna("").astype(str).str.strip()
+    lookup["Materiaaltype"] = lookup["segment"].apply(normalize_materiaaltype)
+
+    if "is_active" in debtors.columns:
+        lookup["_active_rank"] = debtors["is_active"].astype(str).str.lower().eq("active").astype(int)
+    else:
+        lookup["_active_rank"] = 0
+
+    lookup = lookup.sort_values("_active_rank", ascending=False)
+    lookup = lookup.drop_duplicates(subset=["Debiteurnummer_key"], keep="first")
+    lookup_name = lookup.drop_duplicates(subset=["Klantnaam_key"], keep="first")
+    lookup = pd.concat([lookup, lookup_name], ignore_index=True).drop_duplicates()
+    return lookup[["Debiteurnummer_key", "Klantnaam_key", "Segment_debtor_export", "Materiaaltype"]]
+
+
+def _attach_debtor_segments(df: pd.DataFrame, debtor_lookup: pd.DataFrame) -> pd.DataFrame:
+    """Voeg Segment_debtor_export en Materiaaltype toe aan orderregels."""
+    out = df.copy()
+    out["Segment_debtor_export"] = ""
+    out["Materiaaltype"] = "Overig / onbekend"
+
+    if debtor_lookup.empty:
+        return out
+
+    number_candidates = [
+        "Debiteurnummer", "Debiteur nummer", "Debiteur_nummer", "DebiteurNr", "Debiteur nr",
+        "Klantnummer", "Klant nummer", "customer_number", "debtor_number", "number",
+    ]
+    name_candidates = ["Klantnaam", "Debiteur", "Debiteurnaam", "name"]
+
+    matched = pd.Series(False, index=out.index)
+
+    debtor_number_col = _find_first_existing_column(out, number_candidates)
+    if debtor_number_col:
+        number_lookup = (
+            debtor_lookup[debtor_lookup["Debiteurnummer_key"].astype(str).str.strip() != ""]
+            .drop_duplicates(subset=["Debiteurnummer_key"])
+            .set_index("Debiteurnummer_key")
+        )
+        keys = _normalize_number_key(out[debtor_number_col])
+        seg_raw = keys.map(number_lookup["Segment_debtor_export"])
+        mat = keys.map(number_lookup["Materiaaltype"])
+        mask = mat.notna()
+        out.loc[mask, "Segment_debtor_export"] = seg_raw[mask].fillna("").values
+        out.loc[mask, "Materiaaltype"] = mat[mask].values
+        matched = matched | mask
+
+    debtor_name_col = _find_first_existing_column(out, name_candidates)
+    if debtor_name_col:
+        name_lookup = (
+            debtor_lookup[debtor_lookup["Klantnaam_key"].astype(str).str.strip() != ""]
+            .drop_duplicates(subset=["Klantnaam_key"])
+            .set_index("Klantnaam_key")
+        )
+        keys = _normalize_name_key(out[debtor_name_col])
+        seg_raw = keys.map(name_lookup["Segment_debtor_export"])
+        mat = keys.map(name_lookup["Materiaaltype"])
+        mask = mat.notna() & ~matched
+        out.loc[mask, "Segment_debtor_export"] = seg_raw[mask].fillna("").values
+        out.loc[mask, "Materiaaltype"] = mat[mask].values
+
+    out["Materiaaltype"] = out["Materiaaltype"].fillna("Overig / onbekend").apply(normalize_materiaaltype)
+    return out
 
 
 def _load_cgs_as_export_rows(tmp: Path, existing_cgs_ids: set) -> tuple[pd.DataFrame, int]:
@@ -336,6 +534,16 @@ def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataF
 
     # Maak kolommen aan die aansluiten op de merged-structuur.
     reserveringen["Klantnaam"] = reserveringen["Debiteurnaam"] if "Debiteurnaam" in reserveringen.columns else ""
+    debtor_number_col = _find_first_existing_column(
+        reserveringen,
+        [
+            "Debiteurnummer", "Debiteur nummer", "Debiteur_nummer", "DebiteurNr",
+            "Debiteur nr", "Klantnummer", "Klant nummer", "customer_number",
+            "debtor_number",
+        ],
+    )
+    if debtor_number_col and debtor_number_col != "Debiteurnummer":
+        reserveringen["Debiteurnummer"] = reserveringen[debtor_number_col]
     reserveringen["Nummer"] = reserveringen["Ordernummer"].astype(str)
     reserveringen["Leverdatum"] = pd.to_datetime(reserveringen["Leverdatum_reservering_basis"], errors="coerce")
     reserveringen["Datum"] = reserveringen["Datum_verzending"]
@@ -427,6 +635,7 @@ def load_published_data():
     # ── 2. OrderExport2G en feestdagen inladen ────────────────────────────
     order = pd.read_excel(tmp / "OrderExport2G.xlsx")
     holiday_df = pd.read_excel(tmp / "feestdagen.xlsx")
+    debtor_lookup = _load_debtor_segment_lookup(tmp)
 
     # ── 3. Basiskolommen aanmaken ─────────────────────────────────────────
     export["Gewicht_export_kg"] = coerce_numeric(export["Gewicht"])
@@ -447,10 +656,24 @@ def load_published_data():
         .reset_index()
     )
     merged = export.merge(row_counts, on="Ordernummer_base", how="left")
-    # Debiteurnaam meenemen als kolom beschikbaar is in OrderExport2G
+    # Debiteurnaam en debiteurnummer meenemen als kolommen beschikbaar zijn in OrderExport2G
     order_merge_cols = ["Ordernummer", "Gewicht_order_kg"]
     if "Debiteurnaam" in order.columns:
         order_merge_cols.append("Debiteurnaam")
+
+    debtor_number_col_order = _find_first_existing_column(
+        order,
+        [
+            "Debiteurnummer", "Debiteur nummer", "Debiteur_nummer", "DebiteurNr",
+            "Debiteur nr", "Klantnummer", "Klant nummer", "customer_number",
+            "debtor_number",
+        ],
+    )
+    if debtor_number_col_order and debtor_number_col_order not in order_merge_cols:
+        if debtor_number_col_order != "Debiteurnummer":
+            order["Debiteurnummer"] = order[debtor_number_col_order]
+        order_merge_cols.append("Debiteurnummer")
+
     if "Aanleveren depot" in order.columns:
         order_merge_cols.append("Aanleveren depot")
     # Leverdatum V meenemen zodat depot-orders de juiste leverdatum krijgen
@@ -536,7 +759,16 @@ def load_published_data():
             "Aantal_regels_ingelezen": len(reserveringen),
         })
 
-    # ── 7. Feestdagen opschonen ───────────────────────────────────────────
+    # ── 7. Segment / materiaaltype koppelen vanuit debtor-export ─────────────
+    merged = _attach_debtor_segments(merged, debtor_lookup)
+    if not debtor_lookup.empty:
+        export_file_summary.append({
+            "Bronbestand": DEBTOR_EXPORT_FILE,
+            "Bron_week": "segmenten",
+            "Aantal_regels_ingelezen": len(debtor_lookup),
+        })
+
+    # ── 8. Feestdagen opschonen ───────────────────────────────────────────
     holiday_df["Datum"] = pd.to_datetime(holiday_df["Datum"], errors="coerce").dt.date
     holiday_df = (
         holiday_df.dropna(subset=["Datum"])
@@ -678,6 +910,10 @@ def build_dashboard_data(
     holiday_dates = set(holiday_df["Datum"].tolist())
     df = df_raw.copy()
 
+    if "Materiaaltype" not in df.columns:
+        df["Materiaaltype"] = "Overig / onbekend"
+    df["Materiaaltype"] = df["Materiaaltype"].fillna("Overig / onbekend").apply(normalize_materiaaltype)
+
     # Zwarte voorraad: subcategorie o.b.v. Status, ongeacht planningshorizon.
     df["Zwarte_voorraad_categorie"] = df["Status"].map(ZWARTE_VOORRAAD_MAP)
 
@@ -741,6 +977,31 @@ def build_dashboard_data(
         Aantal_orders_te_verzinken=("Nummer", "count"),
     )
 
+    # Uitsplitsing tonnage per materiaaltype/segment. Dit is bewust los van
+    # definitief/reservering, zodat de bestaande grafiek intact blijft en de
+    # materiaal-mix als tweede beeld kan worden getoond.
+    if not df_plan.empty:
+        dag_materiaal = (
+            df_plan.pivot_table(
+                index="Verzinkdatum",
+                columns="Materiaaltype",
+                values="Gewicht_effectief_kg",
+                aggfunc="sum",
+                fill_value=0.0,
+            )
+            .reset_index()
+        )
+    else:
+        dag_materiaal = pd.DataFrame(columns=["Verzinkdatum"])
+
+    for materiaaltype in MATERIAALTYPE_ORDER:
+        if materiaaltype not in dag_materiaal.columns:
+            dag_materiaal[materiaaltype] = 0.0
+
+    dag_materiaal = dag_materiaal[["Verzinkdatum"] + MATERIAALTYPE_ORDER].rename(
+        columns=MATERIAALTYPE_DAG_COLS
+    )
+
     order_holiday_dates = df_plan[
         df_plan["Verzinkdatum"].dt.date.isin(holiday_dates)
     ][["Verzinkdatum"]].drop_duplicates()
@@ -755,9 +1016,12 @@ def build_dashboard_data(
         )
 
     dag = horizon.merge(dag_orders, on="Verzinkdatum", how="left")
+    dag = dag.merge(dag_materiaal, on="Verzinkdatum", how="left")
     dag["Gewicht_kg"]               = dag["Gewicht_kg"].fillna(0.0)
     dag["Gewicht_definitief_kg"]    = dag["Gewicht_definitief_kg"].fillna(0.0)
     dag["Gewicht_reservering_kg"]   = dag["Gewicht_reservering_kg"].fillna(0.0)
+    for col in MATERIAALTYPE_DAG_COLS.values():
+        dag[col] = dag[col].fillna(0.0)
     dag["Aantal_orders_te_verzinken"] = dag["Aantal_orders_te_verzinken"].fillna(0).astype(int)
     dag["Capaciteit_kg"] = np.where(dag["Is_feestdag_of_sluiting"], 0, capaciteit_kg)
     dag["Benutting_pct"] = np.where(
@@ -776,14 +1040,18 @@ def build_dashboard_data(
         dag["Is_feestdag_of_sluiting"], "Feestdag / sluiting", "Werkdag"
     )
 
-    week = dag.groupby(["Jaar", "Week"], as_index=False).agg(
-        Gewicht_kg=("Gewicht_kg", "sum"),
-        Gewicht_definitief_kg=("Gewicht_definitief_kg", "sum"),
-        Gewicht_reservering_kg=("Gewicht_reservering_kg", "sum"),
-        Aantal_orders_te_verzinken=("Aantal_orders_te_verzinken", "sum"),
-        Traverses_berekend=("Traverses_berekend", "sum"),
-        Capaciteit_kg=("Capaciteit_kg", "sum"),
-    )
+    week_agg = {
+        "Gewicht_kg": ("Gewicht_kg", "sum"),
+        "Gewicht_definitief_kg": ("Gewicht_definitief_kg", "sum"),
+        "Gewicht_reservering_kg": ("Gewicht_reservering_kg", "sum"),
+        "Aantal_orders_te_verzinken": ("Aantal_orders_te_verzinken", "sum"),
+        "Traverses_berekend": ("Traverses_berekend", "sum"),
+        "Capaciteit_kg": ("Capaciteit_kg", "sum"),
+    }
+    for col in MATERIAALTYPE_DAG_COLS.values():
+        week_agg[col] = (col, "sum")
+
+    week = dag.groupby(["Jaar", "Week"], as_index=False).agg(**week_agg)
     week["Benutting_pct"] = np.where(
         week["Capaciteit_kg"] > 0,
         (week["Gewicht_kg"] / week["Capaciteit_kg"]) * 100,

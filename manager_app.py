@@ -9,21 +9,26 @@ from shared import (
     APP_VERSION,
     REQUIRED_FILES,
     OPTIONAL_FILES,
+    OPTIONAL_FILE_LABELS,
+    DEBTOR_EXPORT_FILE,
     load_metadata,
     publish_files,
     save_metadata,
     upload_file,
     validate_feestdagen_xlsx,
     validate_required_files_in_folder,
+    validate_debtor_export_xlsx,
+    render_environment_banner,
 )
 from pathlib import Path
 import tempfile
 
-st.set_page_config(layout="wide", page_title="Capaciteitsplanning Coatinc Groningen - Beheer")
+st.set_page_config(layout="wide", page_title="[TEST] Capaciteitsplanning Coatinc Groningen - Beheer")
 
 if os.path.exists("logo_coatinc_groningen.png"):
     st.sidebar.image("logo_coatinc_groningen.png", use_container_width=True)
 st.sidebar.caption(APP_VERSION)
+render_environment_banner("Beheer")
 
 password = st.sidebar.text_input("Wachtwoord", type="password")
 if password != "coatinc2026":
@@ -31,6 +36,7 @@ if password != "coatinc2026":
 
 st.title("Capaciteitsplanning Coatinc Groningen – Beheer")
 st.caption("Upload per bestand en publiceer daarna de volledige dataset voor alle kijkers.")
+st.warning("Let op: dit is de TEST-beheeromgeving. Controleer de bucket/secrets en publiceer alleen bewust bestanden. Als Test dezelfde bucket gebruikt als Main, schrijf je naar dezelfde dataopslag.")
 
 # ── Laatste publicatie ─────────────────────────────────────────────────────────
 meta = load_metadata()
@@ -48,6 +54,8 @@ with top1:
 with top2:
     st.subheader("Vereiste bestanden")
     st.write(", ".join(REQUIRED_FILES))
+    st.subheader("Optionele bestanden")
+    st.write(", ".join(OPTIONAL_FILES))
 
 st.markdown("---")
 
@@ -69,7 +77,7 @@ opt_cols = st.columns(2)
 for i, fname in enumerate(OPTIONAL_FILES):
     with opt_cols[i % 2]:
         uploads[fname] = st.file_uploader(
-            f"Upload {fname} (optioneel – CGS verzinkplanning)",
+            OPTIONAL_FILE_LABELS.get(fname, f"Upload {fname} (optioneel)"),
             type=["xlsx"], key=fname
         )
 
@@ -135,11 +143,14 @@ if publish:
 
         validate_required_files_in_folder(tmp_dir)
 
-        # Upload optional files if provided (no validation required)
+        # Upload optional files if provided. Debtor-export wordt gevalideerd omdat
+        # deze de segmentkoppeling voor het dashboard voedt.
         for fname in OPTIONAL_FILES:
             if uploads.get(fname) is not None:
                 stage[fname] = uploads[fname].getbuffer().tobytes()
                 (tmp_dir / fname).write_bytes(stage[fname])
+                if fname == DEBTOR_EXPORT_FILE:
+                    validate_debtor_export_xlsx(tmp_dir / fname)
 
         # All valid → upload newly uploaded files to cloud
         newly_uploaded = {

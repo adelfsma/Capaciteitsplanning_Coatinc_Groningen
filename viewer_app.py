@@ -5,9 +5,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from shared import APP_VERSION, previous_workday, load_published_data, load_metadata, build_dashboard_data, format_int, format_pct
+from shared import APP_VERSION, MATERIAALTYPE_ORDER, MATERIAALTYPE_DAG_COLS, previous_workday, load_published_data, load_metadata, build_dashboard_data, format_int, format_pct, render_environment_banner
 
-st.set_page_config(layout="wide", page_title="Capaciteitsplanning Coatinc Groningen")
+st.set_page_config(layout="wide", page_title="[TEST] Capaciteitsplanning Coatinc Groningen")
 
 def make_professional_matplotlib_chart(day_df: pd.DataFrame):
     plot_df = day_df.copy()
@@ -66,9 +66,93 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
     fig.tight_layout()
     return fig
 
+
+def make_materiaaltype_matplotlib_chart(day_df: pd.DataFrame):
+    plot_df = day_df.copy()
+    labels = plot_df["Label_nl"].tolist()
+    x = np.arange(len(plot_df))
+    capacity = plot_df["Capaciteit_kg"].tolist()
+    is_holiday = plot_df["Is_feestdag_of_sluiting"].tolist()
+
+    colors = {
+        "Constructie": "#2E75B6",
+        "Maatwerk": "#70AD47",
+        "Seriewerk": "#8064A2",
+        "Overig / onbekend": "#A6A6A6",
+    }
+    GRIJS = "#BDD7EE"
+
+    fig, ax = plt.subplots(figsize=(11, 4.4))
+    for i, holiday in enumerate(is_holiday):
+        if holiday:
+            ax.axvspan(i - 0.5, i + 0.5, alpha=0.12, color="red", zorder=0)
+
+    # Capaciteitsbalk als achtergrond, gelijk aan de bestaande grafiek.
+    ax.bar(x, capacity, width=0.56, color=GRIJS, alpha=0.6, label="Capaciteit", zorder=2)
+
+    bottom = np.zeros(len(plot_df))
+    segment_values = []
+    for materiaaltype in MATERIAALTYPE_ORDER:
+        col = MATERIAALTYPE_DAG_COLS[materiaaltype]
+        values = plot_df[col].fillna(0).astype(float).to_numpy() if col in plot_df.columns else np.zeros(len(plot_df))
+        segment_values.append(values)
+        ax.bar(
+            x,
+            values,
+            width=0.36,
+            bottom=bottom,
+            color=colors.get(materiaaltype, "#A6A6A6"),
+            label=materiaaltype,
+            zorder=3,
+        )
+        bottom = bottom + values
+
+    load = bottom
+    ax.set_title("Tonnage per materiaaltype op verzinkdatum", fontsize=15, pad=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=0)
+    ax.set_ylabel("KG")
+    ax.grid(axis="y", alpha=0.25)
+    ax.set_axisbelow(True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_alpha(0.3)
+    ax.spines["bottom"].set_alpha(0.3)
+    ax.legend(frameon=False, ncols=5, loc="upper left")
+
+    ymax = max(max(capacity) if capacity else 0, max(load) if len(load) else 0) * 1.15
+    if ymax <= 0:
+        ymax = 1
+    ax.set_ylim(0, ymax)
+
+    for i, val in enumerate(load):
+        if val > 0:
+            ax.text(i, val + ymax * 0.015, format_int(val), ha="center", va="bottom", fontsize=8, fontweight="bold")
+
+    # Toon segmentlabels alleen als het segment groot genoeg is, zodat de grafiek leesbaar blijft.
+    bottom_for_label = np.zeros(len(plot_df))
+    for materiaaltype, values in zip(MATERIAALTYPE_ORDER, segment_values):
+        for i, val in enumerate(values):
+            if val > ymax * 0.07:
+                ax.text(
+                    i,
+                    bottom_for_label[i] + val / 2,
+                    format_int(val),
+                    ha="center",
+                    va="center",
+                    fontsize=7,
+                    color="white" if materiaaltype != "Overig / onbekend" else "black",
+                )
+        bottom_for_label = bottom_for_label + values
+
+    fig.tight_layout()
+    return fig
+
+
 if os.path.exists("logo_coatinc_groningen.png"):
     st.sidebar.image("logo_coatinc_groningen.png", width=200)
 st.sidebar.caption(APP_VERSION)
+render_environment_banner("Viewer")
 
 meta = load_metadata()
 if meta:
@@ -132,11 +216,19 @@ with tab1:
     st.subheader("Eerstvolgende leverdatum")
     st.markdown(f'<div style="padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid #d0d7de; background-color: #f6f8fa; margin-bottom: 0.75rem;"><div style="font-size: 2.2rem; font-weight: 700;">{advies_datum.strftime("%d-%m-%Y")}</div></div>', unsafe_allow_html=True)
     st.pyplot(make_professional_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
-    st.caption("De grafiek toont de geplande belasting per verzinkdatum. De verzinkdatum is berekend als de leverdatum minus het ingestelde aantal werkdagen.")
+    st.caption("De grafiek toont de geplande belasting per verzinkdatum, uitgesplitst naar bevestigde orders en reserveringen. De verzinkdatum is berekend als de leverdatum minus het ingestelde aantal werkdagen.")
+
+    st.subheader("Materiaaltype per verzinkdatum")
+    st.pyplot(make_materiaaltype_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
+    st.caption("Deze grafiek toont dezelfde totale dagbelasting, maar dan uitgesplitst naar materiaaltype op basis van het klantsegment uit debtor-export.xlsx.")
+
     st.subheader("Dagoverzicht")
     dag_display = dag.copy()
     dag_display["Verzinkdatum"] = dag_display["Verzinkdatum"].dt.date
+    dag_segment_cols = [col for col in MATERIAALTYPE_DAG_COLS.values() if col in dag_display.columns]
     dag_display["Gewicht_kg"] = dag_display["Gewicht_kg"].apply(format_int)
+    for c in dag_segment_cols:
+        dag_display[c] = dag_display[c].apply(format_int)
     dag_display["Capaciteit_kg"] = dag_display["Capaciteit_kg"].apply(format_int)
     dag_display["Benutting_pct"] = dag_display["Benutting_pct"].apply(format_pct)
     dag_display["Traverses_berekend"] = dag_display["Traverses_berekend"].astype(int)
@@ -145,7 +237,8 @@ with tab1:
         if row["Dagtype"] == "Feestdag / sluiting":
             return ["background-color: rgba(220, 38, 38, 0.12)"] * len(row)
         return [""] * len(row)
-    st.dataframe(dag_display[["Verzinkdatum","Dagtype","Aantal_orders_te_verzinken","Gewicht_kg","Capaciteit_kg","Benutting_pct","Traverses_berekend","Status"]].style.apply(mark_holiday_row, axis=1), width="stretch", hide_index=True)
+    dag_cols = ["Verzinkdatum", "Dagtype", "Aantal_orders_te_verzinken", "Gewicht_kg"] + dag_segment_cols + ["Capaciteit_kg", "Benutting_pct", "Traverses_berekend", "Status"]
+    st.dataframe(dag_display[dag_cols].style.apply(mark_holiday_row, axis=1), width="stretch", hide_index=True)
     st.subheader("Weekoverzicht")
     week_display = week.copy()
     week_display["Gewicht_kg"] = week_display["Gewicht_kg"].apply(format_int)
@@ -160,7 +253,7 @@ with tab1:
 
 with tab2:
     st.subheader("Gebruikte gegevens / controletabel")
-    relevant_cols = ["Bronbestand","Bron_week","Nummer","Ordernummer_base","Klantnaam","Gewicht_effectief_kg","Status","Verzinkstatus","Meegeteld_in_planning","Reden_uitsluiting","Datum","Leverdatum","Verzinkdatum","Aanleveren depot","Gewicht","Gewicht_export_kg","Gewicht_order_kg","Regels_per_order","Gewicht_2g_verdeeld_kg","Gewicht_bron"]
+    relevant_cols = ["Bronbestand","Bron_week","Nummer","Ordernummer_base","Debiteurnummer","Klantnaam","Segment_debtor_export","Materiaaltype","Gewicht_effectief_kg","Status","Verzinkstatus","Meegeteld_in_planning","Reden_uitsluiting","Datum","Leverdatum","Verzinkdatum","Aanleveren depot","Gewicht","Gewicht_export_kg","Gewicht_order_kg","Regels_per_order","Gewicht_2g_verdeeld_kg","Gewicht_bron"]
     relevant_cols = [c for c in relevant_cols if c in df.columns]
     controle_df = df[relevant_cols].copy() if toon_alle_regels else df_plan[relevant_cols].copy()
 
@@ -169,7 +262,7 @@ with tab2:
         controle_df["_Verzinkdatum_filter"] = pd.to_datetime(controle_df["Verzinkdatum"], errors="coerce")
 
     st.markdown("### Filters")
-    filter_col1, filter_col2, filter_col3, filter_col4 = st.columns([1.2, 1, 1, 1])
+    filter_col1, filter_col2, filter_col3, filter_col4, filter_col5 = st.columns([1.2, 1, 1, 1, 1.2])
 
     with filter_col1:
         if "Status" in controle_df.columns:
@@ -208,6 +301,19 @@ with tab2:
         else:
             selected_verzinkstatus = []
 
+    with filter_col5:
+        if "Materiaaltype" in controle_df.columns:
+            materiaaltype_opties = [m for m in MATERIAALTYPE_ORDER if m in set(controle_df["Materiaaltype"].dropna().astype(str))]
+            overige_opties = sorted([m for m in controle_df["Materiaaltype"].dropna().astype(str).unique() if m not in materiaaltype_opties])
+            materiaaltype_opties = materiaaltype_opties + overige_opties
+            selected_materiaaltype = st.multiselect(
+                "Materiaaltype",
+                options=materiaaltype_opties,
+                default=materiaaltype_opties,
+            )
+        else:
+            selected_materiaaltype = []
+
     filtered_df = controle_df.copy()
 
     if "Status" in filtered_df.columns and selected_status:
@@ -215,6 +321,9 @@ with tab2:
 
     if "Verzinkstatus" in filtered_df.columns and selected_verzinkstatus:
         filtered_df = filtered_df[filtered_df["Verzinkstatus"].astype(str).isin(selected_verzinkstatus)]
+
+    if "Materiaaltype" in filtered_df.columns and selected_materiaaltype:
+        filtered_df = filtered_df[filtered_df["Materiaaltype"].astype(str).isin(selected_materiaaltype)]
 
     if "_Verzinkdatum_filter" in filtered_df.columns:
         if verzinkdatum_van is not None:
@@ -267,6 +376,13 @@ with tab3:
         {"Categorie":"Records","Omschrijving":"Open orders","Waarde":int((df["Meegeteld_in_planning"] == "Ja").sum())},
         {"Categorie":"Gewicht","Omschrijving":"Totaal gewicht open orders (kg)","Waarde":int(round(df_plan["Gewicht_effectief_kg"].sum(), 0)) if len(df_plan) > 0 else 0},
     ]
+    if "Materiaaltype" in df_plan.columns:
+        for materiaaltype in MATERIAALTYPE_ORDER:
+            debug_rows.append({
+                "Categorie":"Gewicht per materiaaltype",
+                "Omschrijving":materiaaltype,
+                "Waarde":int(round(df_plan.loc[df_plan["Materiaaltype"] == materiaaltype, "Gewicht_effectief_kg"].sum(), 0)),
+            })
     for _, row in export_file_summary.iterrows():
         debug_rows.append({"Categorie":"Bestanden","Omschrijving":f'{row["Bronbestand"]} ({row["Bron_week"]})',"Waarde":int(row["Aantal_regels_ingelezen"])})
     debug_df = pd.DataFrame(debug_rows)
