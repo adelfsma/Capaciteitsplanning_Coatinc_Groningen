@@ -168,18 +168,57 @@ def make_materiaaltype_matplotlib_chart(day_df: pd.DataFrame):
     return fig
 
 
+def _otif_pct_to_angle(
+    pct: float,
+    threshold_green: float = OTIF_GAUGE_GREEN_THRESHOLD,
+    threshold_orange: float = OTIF_GAUGE_ORANGE_THRESHOLD,
+) -> float:
+    """
+    Zet een OTIF-percentage om naar een arc-hoek volgens een piecewise-lineaire
+    schaal waarbij elke zone (rood, oranje, groen) precies 60° van de
+    halfronde meter beslaat. Zo is het groene gebied altijd goed zichtbaar,
+    ook al is 96–100 % maar een smalle band in de businessdefinitie.
+    De naaldpositie binnen een zone blijft lineair, dus goed afleesbaar.
+    """
+    clip = max(0.0, min(100.0, pct))
+    if clip <= threshold_orange:
+        return 180.0 - (clip / threshold_orange) * 60.0
+    if clip <= threshold_green:
+        return 120.0 - ((clip - threshold_orange) / (threshold_green - threshold_orange)) * 60.0
+    return 60.0 - ((clip - threshold_green) / (100.0 - threshold_green)) * 60.0
+
+
+def _otif_zone_color(
+    pct: float | None,
+    threshold_green: float = OTIF_GAUGE_GREEN_THRESHOLD,
+    threshold_orange: float = OTIF_GAUGE_ORANGE_THRESHOLD,
+) -> str:
+    """Bepaal de kleur (groen/oranje/rood/grijs) voor een OTIF-waarde."""
+    if pct is None:
+        return "#6b7280"
+    if pct >= threshold_green:
+        return "#16a34a"
+    if pct >= threshold_orange:
+        return "#f59e0b"
+    return "#dc2626"
+
+
 def make_otif_gauge(
     otif_pct: float | None,
     threshold_green: float = OTIF_GAUGE_GREEN_THRESHOLD,
     threshold_orange: float = OTIF_GAUGE_ORANGE_THRESHOLD,
     title: str = "OTIF",
     figsize: tuple[float, float] = (5.2, 3.4),
+    show_value: bool = True,
+    show_title: bool = True,
 ):
     """
-    Teken een halfronde snelheidsmeter voor de OTIF-KPI.
+    Matplotlib-variant van de OTIF-snelheidsmeter voor het OTIF-tabblad.
     - < 80 %             → rood
     - 80 % – < 96 %      → oranje
-    - ≥ 96 %             → groen (in lijn met de businessdoelstelling)
+    - ≥ 96 %             → groen
+    De arc is verdeeld in drie even brede zones (elk 60°); binnen elke zone
+    is de naaldpositie lineair.
     """
     from matplotlib.patches import Wedge
 
@@ -196,27 +235,23 @@ def make_otif_gauge(
     ax.set_aspect("equal")
     ax.axis("off")
 
-    # 0 % ligt links (180°), 100 % ligt rechts (0°).
-    def pct_to_angle(p: float) -> float:
-        return 180.0 - (max(0.0, min(100.0, p)) / 100.0) * 180.0
-
     outer_r = 1.0
     ring_width = 0.28
 
-    # Achtergrondring als er nog geen waarde is.
+    # Achtergrondring om ontbrekende data netjes te tonen.
     ax.add_patch(Wedge((0, 0), outer_r, 0, 180, width=ring_width, facecolor=GRIJS, edgecolor="none"))
 
-    # Gekleurde zones.
-    ax.add_patch(Wedge((0, 0), outer_r, pct_to_angle(threshold_orange), 180,
-                       width=ring_width, facecolor=ROOD, edgecolor="none"))
-    ax.add_patch(Wedge((0, 0), outer_r, pct_to_angle(threshold_green), pct_to_angle(threshold_orange),
-                       width=ring_width, facecolor=ORANJE, edgecolor="none"))
-    ax.add_patch(Wedge((0, 0), outer_r, 0, pct_to_angle(threshold_green),
-                       width=ring_width, facecolor=GROEN, edgecolor="none"))
+    # Drie even brede zones op vaste posities.
+    ax.add_patch(Wedge((0, 0), outer_r, 120, 180, width=ring_width, facecolor=ROOD,   edgecolor="none"))
+    ax.add_patch(Wedge((0, 0), outer_r,  60, 120, width=ring_width, facecolor=ORANJE, edgecolor="none"))
+    ax.add_patch(Wedge((0, 0), outer_r,   0,  60, width=ring_width, facecolor=GROEN,  edgecolor="none"))
 
-    # Schaalstreepjes en labels op 0, 20, 40, 60, 80, 100.
-    for pct in (0, 20, 40, 60, 80, 100):
-        angle_rad = np.deg2rad(pct_to_angle(pct))
+    # Labels op de zonegrenzen + intermediair per zone voor context.
+    for pct_val in (0, threshold_orange / 2, threshold_orange,
+                    (threshold_orange + threshold_green) / 2, threshold_green,
+                    (threshold_green + 100) / 2, 100):
+        angle_deg = _otif_pct_to_angle(pct_val, threshold_green, threshold_orange)
+        angle_rad = np.deg2rad(angle_deg)
         x1 = (outer_r - ring_width) * np.cos(angle_rad)
         y1 = (outer_r - ring_width) * np.sin(angle_rad)
         x2 = (outer_r - ring_width - 0.06) * np.cos(angle_rad)
@@ -224,39 +259,131 @@ def make_otif_gauge(
         ax.plot([x1, x2], [y1, y2], color=DONKER, linewidth=1.1)
         xl = (outer_r - ring_width - 0.16) * np.cos(angle_rad)
         yl = (outer_r - ring_width - 0.16) * np.sin(angle_rad)
-        ax.text(xl, yl, f"{pct}", ha="center", va="center", fontsize=8, color=DONKER)
+        # Belangrijkste labels dikker, halverwege-labels wat lichter.
+        is_boundary = pct_val in (0, threshold_orange, threshold_green, 100)
+        ax.text(
+            xl, yl,
+            f"{pct_val:.0f}" if pct_val == int(pct_val) else f"{pct_val:.1f}",
+            ha="center", va="center",
+            fontsize=8 if is_boundary else 7,
+            color=DONKER if is_boundary else MIDGRIJS,
+            fontweight="bold" if is_boundary else "normal",
+        )
 
-    # Titel bovenin.
-    ax.text(0, 1.14, title, ha="center", va="center", fontsize=13, fontweight="bold", color=DONKER)
+    if show_title:
+        ax.text(0, 1.14, title, ha="center", va="center", fontsize=13, fontweight="bold", color=DONKER)
 
-    # Naaldwaarde + numerieke weergave.
     if otif_pct is None:
         ax.plot([0], [0], marker="o", color=MIDGRIJS, markersize=9)
-        ax.text(0, -0.28, "geen data", ha="center", va="center",
-                fontsize=14, fontweight="bold", color=MIDGRIJS)
+        if show_value:
+            ax.text(0, -0.28, "geen data", ha="center", va="center",
+                    fontsize=14, fontweight="bold", color=MIDGRIJS)
         return fig
 
-    clip = max(0.0, min(100.0, float(otif_pct)))
-    needle_angle = np.deg2rad(pct_to_angle(clip))
+    needle_angle = np.deg2rad(_otif_pct_to_angle(float(otif_pct), threshold_green, threshold_orange))
     needle_len = outer_r - ring_width - 0.02
     nx = needle_len * np.cos(needle_angle)
     ny = needle_len * np.sin(needle_angle)
     ax.plot([0, nx], [0, ny], color=DONKER, linewidth=2.8, solid_capstyle="round")
     ax.plot([0], [0], marker="o", color=DONKER, markersize=11)
 
-    # Kleur van het cijfer volgt de zonewaarin de waarde valt.
-    if otif_pct >= threshold_green:
-        num_color = GROEN
-    elif otif_pct >= threshold_orange:
-        num_color = ORANJE
-    else:
-        num_color = ROOD
-
-    ax.text(0, -0.30, f"{otif_pct:.1f}%", ha="center", va="center",
-            fontsize=24, fontweight="bold", color=num_color)
+    if show_value:
+        num_color = _otif_zone_color(otif_pct, threshold_green, threshold_orange)
+        ax.text(0, -0.30, f"{otif_pct:.1f}%", ha="center", va="center",
+                fontsize=24, fontweight="bold", color=num_color)
 
     fig.tight_layout()
     return fig
+
+
+def make_otif_gauge_svg(
+    otif_pct: float | None,
+    threshold_green: float = OTIF_GAUGE_GREEN_THRESHOLD,
+    threshold_orange: float = OTIF_GAUGE_ORANGE_THRESHOLD,
+    width: int = 300,
+    height: int = 160,
+) -> str:
+    """
+    Compact SVG-gauge voor gebruik in een HTML-kaart. Geen tekstboven/-onder;
+    de titel en het percentage worden in de kaart-HTML gerenderd, zodat de
+    kaart precies dezelfde uitlijning krijgt als de voorraadkaarten.
+    """
+    import math
+
+    ROOD, ORANJE, GROEN = "#dc2626", "#f59e0b", "#16a34a"
+    DONKER, MIDGRIJS = "#111827", "#6b7280"
+
+    cx = width / 2
+    cy = height * 0.86
+    r_outer = min(width * 0.40, height * 0.72)
+    r_inner = r_outer * 0.60
+    label_r = r_inner - 12
+
+    def polar(r: float, a_deg: float) -> tuple[float, float]:
+        rad = math.radians(a_deg)
+        return (cx + r * math.cos(rad), cy - r * math.sin(rad))
+
+    def ring_segment_path(a_start: float, a_end: float, steps: int = 32) -> str:
+        outer_pts, inner_pts = [], []
+        for i in range(steps + 1):
+            t = i / steps
+            a = a_start + t * (a_end - a_start)
+            outer_pts.append(polar(r_outer, a))
+            inner_pts.append(polar(r_inner, a))
+        parts = [f"M {outer_pts[0][0]:.2f},{outer_pts[0][1]:.2f}"]
+        for x, y in outer_pts[1:]:
+            parts.append(f"L {x:.2f},{y:.2f}")
+        for x, y in reversed(inner_pts):
+            parts.append(f"L {x:.2f},{y:.2f}")
+        parts.append("Z")
+        return " ".join(parts)
+
+    svg_parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'width="100%" style="display:block; max-width:100%; height:auto;" '
+        f'aria-label="OTIF snelheidsmeter">'
+    ]
+
+    # Zones (elk 60° op de arc).
+    svg_parts.append(f'<path d="{ring_segment_path(180, 120)}" fill="{ROOD}" />')
+    svg_parts.append(f'<path d="{ring_segment_path(120,  60)}" fill="{ORANJE}" />')
+    svg_parts.append(f'<path d="{ring_segment_path( 60,   0)}" fill="{GROEN}" />')
+
+    # Streepjes en labels op de zonegrenzen.
+    for pct_val in (0, threshold_orange, threshold_green, 100):
+        a = _otif_pct_to_angle(pct_val, threshold_green, threshold_orange)
+        x1, y1 = polar(r_inner, a)
+        x2, y2 = polar(r_inner - 5, a)
+        svg_parts.append(
+            f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
+            f'stroke="{DONKER}" stroke-width="1.2" />'
+        )
+        xl, yl = polar(label_r, a)
+        svg_parts.append(
+            f'<text x="{xl:.2f}" y="{yl:.2f}" text-anchor="middle" '
+            f'dominant-baseline="central" font-size="10" font-weight="600" '
+            f'fill="{DONKER}" font-family="sans-serif">{int(pct_val)}</text>'
+        )
+
+    # Naald.
+    if otif_pct is None:
+        svg_parts.append(
+            f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="6" fill="{MIDGRIJS}" />'
+        )
+    else:
+        a = _otif_pct_to_angle(float(otif_pct), threshold_green, threshold_orange)
+        needle_len = r_outer - 4
+        nx, ny = polar(needle_len, a)
+        svg_parts.append(
+            f'<line x1="{cx:.2f}" y1="{cy:.2f}" x2="{nx:.2f}" y2="{ny:.2f}" '
+            f'stroke="{DONKER}" stroke-width="3" stroke-linecap="round" />'
+        )
+        svg_parts.append(
+            f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="7" fill="{DONKER}" />'
+        )
+
+    svg_parts.append("</svg>")
+    return "".join(svg_parts)
 
 
 if os.path.exists("logo_coatinc_groningen.png"):
@@ -374,8 +501,9 @@ with tab1:
         df.loc[status_norm.isin(witte_statussen_norm), "Gewicht_effectief_kg"].sum()
     ) if "Status" in df.columns else 0.0
 
-    # Gedeelde opmaak voor de twee voorraadkaarten. De KPI-tegel voor OTIF
-    # staat in een aparte Streamlit-kolom naast de kaarten.
+    # Gedeelde opmaak voor de drie kaarten. Door min-height én box-sizing te
+    # zetten krijgen zwarte voorraad, witte voorraad en OTIF exact dezelfde
+    # hoogte, zodat de rij netjes uitgelijnd is.
     st.markdown(
         """
         <style>
@@ -385,8 +513,12 @@ with tab1:
             padding: 1.05rem 1.15rem;
             background: #ffffff;
             box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
-            height: 100%;
             box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            min-height: 240px;
+            height: 100%;
         }
         .cgr-stock-card-accent-black { border-left: 8px solid #1f2937; }
         .cgr-stock-card-accent-white { border-left: 8px solid #94a3b8; }
@@ -395,33 +527,44 @@ with tab1:
             font-size: 0.95rem;
             color: #475569;
             font-weight: 650;
-            margin-bottom: 0.25rem;
+            margin-bottom: 0.35rem;
         }
         .cgr-stock-value {
             font-size: 2.15rem;
             line-height: 1.12;
             color: #111827;
             font-weight: 750;
-            margin-bottom: 0.7rem;
+            margin-bottom: 0.55rem;
         }
         .cgr-stock-detail {
-            font-size: 0.9rem;
+            font-size: 0.88rem;
             color: #475569;
             line-height: 1.45;
+            margin-top: 0.35rem;
         }
+        .cgr-stock-gauge {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0.15rem 0 0.25rem 0;
+            flex: 1 1 auto;
+        }
+        .cgr-stock-gauge svg { max-height: 130px; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    col_zwart, col_wit, col_otif = st.columns([1, 1, 1.25])
+    col_zwart, col_wit, col_otif = st.columns(3)
 
     with col_zwart:
         st.markdown(
             f"""
             <div class="cgr-stock-card cgr-stock-card-accent-black">
-                <div class="cgr-stock-label">Zwarte voorraad (kg)</div>
-                <div class="cgr-stock-value">{format_int(kg_totale_zwarte_voorraad)}</div>
+                <div>
+                    <div class="cgr-stock-label">Zwarte voorraad (kg)</div>
+                    <div class="cgr-stock-value">{format_int(kg_totale_zwarte_voorraad)}</div>
+                </div>
                 <div class="cgr-stock-detail">
                     Productie gereed: <strong>{format_int(kg_productie_gereed)}</strong> kg<br>
                     Binnengemeld / voorbewerking / geblokkeerd: <strong>{format_int(kg_voorbewerking_geblokkeerd)}</strong> kg
@@ -435,8 +578,10 @@ with tab1:
         st.markdown(
             f"""
             <div class="cgr-stock-card cgr-stock-card-accent-white">
-                <div class="cgr-stock-label">Witte voorraad (kg)</div>
-                <div class="cgr-stock-value">{format_int(kg_witte_voorraad)}</div>
+                <div>
+                    <div class="cgr-stock-label">Witte voorraad (kg)</div>
+                    <div class="cgr-stock-value">{format_int(kg_witte_voorraad)}</div>
+                </div>
                 <div class="cgr-stock-detail">
                     Statussen: Afgehaald, Nabewerking nog uitvoeren, PC Afgehaald en Coat gereed
                 </div>
@@ -446,13 +591,14 @@ with tab1:
         )
 
     with col_otif:
-        # OTIF: snelheidsmeter op basis van de orders op de peildatum.
+        # OTIF: labeltekst + snelheidsmeter (SVG) + samenvattingsregel, alles
+        # binnen dezelfde HTML-kaart zodat de uitlijning identiek is aan de
+        # voorraadkaarten.
         peildatum_str = pd.Timestamp(otif_result["peildatum"]).strftime("%d-%m-%Y")
-        gauge_title = f"OTIF · {otif_result['date_column_label']} = {peildatum_str}"
-        st.pyplot(
-            make_otif_gauge(otif_result["otif_pct"], title=gauge_title),
-            clear_figure=True,
-            use_container_width=True,
+        otif_num_color = _otif_zone_color(otif_result["otif_pct"])
+        otif_pct_html = (
+            "geen data" if otif_result["otif_pct"] is None
+            else f"{otif_result['otif_pct']:.1f}%"
         )
         if otif_result["totaal"] > 0:
             samenvatting = (
@@ -463,9 +609,24 @@ with tab1:
             if otif_result["onbekend"] > 0:
                 samenvatting += f" · {otif_result['onbekend']} onbekend"
             samenvatting += f" (totaal {otif_result['totaal']} orders)"
-            st.caption(samenvatting)
         else:
-            st.caption("Geen orders met deze peildatum in de dataset.")
+            samenvatting = "Geen orders met deze peildatum in de dataset."
+
+        gauge_svg = make_otif_gauge_svg(otif_result["otif_pct"])
+
+        st.markdown(
+            f"""
+            <div class="cgr-stock-card cgr-stock-card-accent-otif">
+                <div>
+                    <div class="cgr-stock-label">OTIF · {otif_result['date_column_label']} = {peildatum_str}</div>
+                    <div class="cgr-stock-value" style="color: {otif_num_color};">{otif_pct_html}</div>
+                </div>
+                <div class="cgr-stock-gauge">{gauge_svg}</div>
+                <div class="cgr-stock-detail">{samenvatting}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     st.subheader("Eerstvolgende leverdatum")
     st.markdown(f'<div style="padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid #d0d7de; background-color: #f6f8fa; margin-bottom: 0.75rem;"><div style="font-size: 2.2rem; font-weight: 700;">{advies_datum.strftime("%d-%m-%Y")}</div></div>', unsafe_allow_html=True)
@@ -661,6 +822,8 @@ OTIF = (1 − *aantal te laat* / *totaal aantal orders*) × 100 %
 - **Nvt**: PC Afgehaald
 
 Groen op de meter vanaf **{OTIF_GAUGE_GREEN_THRESHOLD:.0f}%**, oranje vanaf **{OTIF_GAUGE_ORANGE_THRESHOLD:.0f}%**, onder deze grens rood.
+
+*De schaal is bewust niet-lineair: elke zone (rood, oranje, groen) beslaat een even groot deel van de meter, zodat de groene zone (96–100 %) duidelijk zichtbaar blijft. Binnen elke zone is de naaldpositie wél lineair.*
 """
         )
 

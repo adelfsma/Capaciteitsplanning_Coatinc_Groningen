@@ -1,3 +1,18 @@
+Capaciteitsplanning Coatinc Groningen v2.5.1
+
+Verbeteringen:
+- Uitlijning: de OTIF-tegel staat nu in dezelfde HTML-kaart als de
+  voorraadkaarten. Alle drie de kaarten in het Dashboard hebben identieke
+  hoogte, padding en border. De snelheidsmeter is als inline SVG in de
+  kaart ingebed.
+- Snelheidsmeter: nieuwe niet-lineaire schaal waarbij de rode, oranje
+  en groene zone elk 60° van de arc beslaan. De groene zone (96–100 %)
+  is nu duidelijk zichtbaar. Binnen elke zone is de naaldpositie
+  lineair, dus goed afleesbaar.
+- Labels op de meter tonen de zonegrenzen (0, 80, 96, 100), met
+  op de matplotlib-variant in het OTIF-tabblad ook lichte tussenlabels.
+
+
 Capaciteitsplanning Coatinc Groningen v2.5.0
 
 Toegevoegd:

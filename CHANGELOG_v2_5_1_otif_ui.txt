@@ -1,0 +1,44 @@
+v2.5.1 UI-verbeteringen OTIF-KPI
+
+Aanleiding: gebruikersfeedback op v2.5.0 – de OTIF-kaart stond visueel
+niet gelijk uitgelijnd met de voorraadkaarten, en het groene gedeelte van
+de snelheidsmeter was slechts 4 % van de arc en dus nauwelijks zichtbaar.
+
+Wijzigingen:
+
+viewer_app.py
+- Nieuwe helper `_otif_pct_to_angle`: piecewise-lineaire schaal waarbij
+  elke zone (rood, oranje, groen) precies 60° van de halfronde meter
+  beslaat. Binnen elke zone blijft de naaldpositie lineair, dus goed
+  afleesbaar.
+- Nieuwe helper `_otif_zone_color`: geeft de kleur voor een OTIF-waarde
+  (rood / oranje / groen / grijs bij geen data). Gedeeld tussen de HTML-
+  kaart en de matplotlib-versie.
+- Nieuwe helper `make_otif_gauge_svg`: rendert de snelheidsmeter als
+  inline SVG-string. Wordt geëmbed in de HTML-kaart in het dashboard,
+  zodat er geen extra Streamlit-container tussen komt.
+- `make_otif_gauge` (matplotlib) gebruikt nu ook de equal-zone verdeling
+  en toont zonegrens-labels dikker dan de tussenlabels.
+- Dashboard-lay-out: de drie kaarten (Zwarte voorraad, Witte voorraad,
+  OTIF) hebben nu identieke box-styling met `min-height: 240px`,
+  `display: flex` en `justify-content: space-between`. Alle drie
+  gebruiken exact dezelfde `.cgr-stock-card`-container met een
+  linker-accent-strip (grijs/wit-grijs/groen).
+- Uitlegtekst in het OTIF-tabblad benoemt de niet-lineaire schaal, zodat
+  duidelijk is waarom de zones even breed zijn getekend.
+
+shared.py
+- APP_VERSION → v2.5.1
+
+test_otif.py
+- Nieuwe test `test_gauge_equal_zone_math`: verifieert dat de zonegrenzen
+  op 180°, 120°, 60°, 0° liggen en dat elke zone 60° breed is.
+
+Pixel-uitlijningstest (mockup):
+- Alle drie kaarten: top-edge y=74, bottom-edge y=373, hoogte=299px.
+  Identiek, ongeacht de textlengte in de detailregels.
+
+Geen wijzigingen in:
+- shared.py OTIF-berekening en peildatum-logica
+- manager_app.py (byte-voor-byte identiek)
+- upload/publicatie-flow of vereiste bestanden

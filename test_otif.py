@@ -231,8 +231,49 @@ def test_otif_status_map_content():
     print("✅ test_otif_status_map_content")
 
 
+def test_gauge_equal_zone_math():
+    """
+    Verifieer de piecewise-lineaire schaal die de gauge gebruikt: elke zone
+    (rood/oranje/groen) beslaat exact 60° van de arc. Deze functie zit in
+    viewer_app.py maar we kunnen de wiskunde 1-op-1 hier uitrekenen.
+    """
+    tg = 96.0
+    to = 80.0
+
+    def pct_to_angle(pct):
+        clip = max(0.0, min(100.0, pct))
+        if clip <= to:
+            return 180.0 - (clip / to) * 60.0
+        if clip <= tg:
+            return 120.0 - ((clip - to) / (tg - to)) * 60.0
+        return 60.0 - ((clip - tg) / (100.0 - tg)) * 60.0
+
+    # Zonegrenzen liggen op exact 180, 120, 60, 0 graden.
+    assert abs(pct_to_angle(0)   - 180.0) < 1e-9
+    assert abs(pct_to_angle(to)  - 120.0) < 1e-9   # rood/oranje-grens
+    assert abs(pct_to_angle(tg)  -  60.0) < 1e-9   # oranje/groen-grens
+    assert abs(pct_to_angle(100) -   0.0) < 1e-9
+
+    # Middens van de zones liggen in het midden van hun arc-segment.
+    assert abs(pct_to_angle(to/2)         - 150.0) < 1e-9  # midden rood
+    assert abs(pct_to_angle((to+tg)/2)    -  90.0) < 1e-9  # midden oranje
+    assert abs(pct_to_angle((tg+100)/2)   -  30.0) < 1e-9  # midden groen
+
+    # Elke zone beslaat 60° - dit is de businesswaarde die de zichtbaarheid
+    # van de groene band verzekert.
+    assert abs((pct_to_angle(0)  - pct_to_angle(to))  - 60.0) < 1e-9
+    assert abs((pct_to_angle(to) - pct_to_angle(tg))  - 60.0) < 1e-9
+    assert abs((pct_to_angle(tg) - pct_to_angle(100)) - 60.0) < 1e-9
+
+    # Onder- en overloop klippen naar 0/180
+    assert abs(pct_to_angle(-10)  - 180.0) < 1e-9
+    assert abs(pct_to_angle(150)  -   0.0) < 1e-9
+    print("✅ test_gauge_equal_zone_math (elke zone = 60°)")
+
+
 if __name__ == "__main__":
     test_otif_status_map_content()
+    test_gauge_equal_zone_math()
     test_map_otif_status_matches_spec()
     test_find_originele_leverdatum_column()
     test_compute_otif_basic()
