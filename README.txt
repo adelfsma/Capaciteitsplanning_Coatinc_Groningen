@@ -1,3 +1,33 @@
+Capaciteitsplanning Coatinc Groningen v2.5.0
+
+Toegevoegd:
+- KPI OTIF (On Time In Full): percentage orders op tijd gereed, zichtbaar
+  als snelheidsmeter in het Dashboard-tabblad naast de voorraadkaarten.
+- Peildatum voor OTIF is standaard de dag van de laatste publicatie
+  (metadata.published_at); via de zijbalk aanpasbaar voor terugkijkende
+  analyse.
+- Nieuw tabblad "OTIF": kerncijfers, formule-uitleg, gefilterde detailtabel
+  en een Excel-download in de stijl van "Gebruikte gegevens".
+- Statusmapping conform Status_OTIF.xlsx (Ja / Nee / Nvt); reserveringen
+  worden bij de OTIF-berekening niet meegeteld.
+- In de testomgeving kan de OTIF-berekening óf tegen "Datum" óf tegen
+  "Originele datum" worden getoetst (zodra de kolom in de weekexports
+  aanwezig is). In productie blijft de businessdefinitie "Datum".
+
+Drempels (aanpasbaar in shared.py):
+- Groen  : ≥ 96,0 % op tijd
+- Oranje : 80,0 % – 96,0 %
+- Rood   : < 80,0 %
+
+Formule:
+  OTIF = (1 − aantal te laat / totaal aantal orders op peildatum) × 100 %
+
+Bestanden ongewijzigd t.o.v. v2.4.3 (geen nieuwe uploads nodig): de OTIF
+wordt afgeleid uit de reeds gebruikte weekexports (Export.xlsx). Optioneel
+kunnen deze exports een "Originele datum"-kolom bevatten voor de tweede
+variant.
+
+
 Capaciteitsplanning Coatinc Groningen v2.4.0
 
 Toegevoegd:
