@@ -1,3 +1,17 @@
+Capaciteitsplanning Coatinc Groningen v2.5.2
+
+Verbeteringen (compact + verfijnd):
+- KPI-strook is nu compact zodat de focus op de capaciteitsgrafieken
+  eronder blijft. De drie kaarten (Zwarte voorraad, Witte voorraad,
+  OTIF) zijn met identieke inhoudsstructuur opgezet: label · groot
+  getal · detailregel. Automatisch gelijke hoogte (128 px).
+- De halfronde snelheidsmeter op het dashboard is vervangen door een
+  slanke horizontale 3-zone bar met een klein driehoekje als indicator.
+  Neemt vrijwel geen ruimte in en oogt professioneel.
+- De volledige gauge (matplotlib, equal-zone verdeling) blijft
+  beschikbaar in het OTIF-tabblad voor drill-down.
+
+
 Capaciteitsplanning Coatinc Groningen v2.5.1
 
 Verbeteringen:

@@ -296,6 +296,66 @@ def make_otif_gauge(
     return fig
 
 
+def make_otif_zone_bar_svg(
+    otif_pct: float | None,
+    threshold_green: float = OTIF_GAUGE_GREEN_THRESHOLD,
+    threshold_orange: float = OTIF_GAUGE_ORANGE_THRESHOLD,
+    width: int = 260,
+    height: int = 18,
+) -> str:
+    """
+    Compacte horizontale 3-zone bar (mini-snelheidsmeter) voor gebruik in de
+    OTIF-dashboardkaart. De bar bestaat uit drie gelijke segmenten
+    (rood/oranje/groen) en een kleine driehoek als indicator van de huidige
+    OTIF-waarde. Blijft ruim binnen de hoogte van een tekstregel, zodat de
+    OTIF-kaart precies dezelfde totale hoogte krijgt als de voorraadkaarten.
+    """
+    ROOD, ORANJE, GROEN = "#dc2626", "#f59e0b", "#16a34a"
+    DONKER, MIDGRIJS = "#111827", "#6b7280"
+
+    bar_y = 0
+    bar_h = 6
+    seg_w = width / 3.0
+
+    def pct_to_x(pct: float) -> float:
+        clip = max(0.0, min(100.0, pct))
+        if clip <= threshold_orange:
+            return (clip / threshold_orange) * seg_w
+        if clip <= threshold_green:
+            return seg_w + ((clip - threshold_orange) / (threshold_green - threshold_orange)) * seg_w
+        return 2 * seg_w + ((clip - threshold_green) / (100.0 - threshold_green)) * seg_w
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'width="100%" style="display:block; max-width:100%; height:auto;" '
+        f'aria-label="OTIF zone-indicator">'
+    ]
+    # Drie zones. Buitenste hoeken licht afgerond voor een verfijnde look.
+    parts.append(f'<rect x="0" y="{bar_y}" width="{seg_w:.2f}" height="{bar_h}" '
+                 f'fill="{ROOD}" rx="2" ry="2" />')
+    parts.append(f'<rect x="{seg_w:.2f}" y="{bar_y}" width="{seg_w:.2f}" height="{bar_h}" '
+                 f'fill="{ORANJE}" />')
+    parts.append(f'<rect x="{2*seg_w:.2f}" y="{bar_y}" width="{seg_w:.2f}" height="{bar_h}" '
+                 f'fill="{GROEN}" rx="2" ry="2" />')
+
+    # Indicator: driehoek onder de bar wijzend naar de huidige waarde.
+    if otif_pct is None:
+        cx = width / 2.0
+        parts.append(
+            f'<polygon points="{cx-3.5:.2f},{bar_h+11} {cx+3.5:.2f},{bar_h+11} '
+            f'{cx:.2f},{bar_h+3}" fill="{MIDGRIJS}" />'
+        )
+    else:
+        x = pct_to_x(float(otif_pct))
+        parts.append(
+            f'<polygon points="{x-4:.2f},{bar_h+11} {x+4:.2f},{bar_h+11} '
+            f'{x:.2f},{bar_h+3}" fill="{DONKER}" />'
+        )
+
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 def make_otif_gauge_svg(
     otif_pct: float | None,
     threshold_green: float = OTIF_GAUGE_GREEN_THRESHOLD,
@@ -304,9 +364,9 @@ def make_otif_gauge_svg(
     height: int = 160,
 ) -> str:
     """
-    Compact SVG-gauge voor gebruik in een HTML-kaart. Geen tekstboven/-onder;
-    de titel en het percentage worden in de kaart-HTML gerenderd, zodat de
-    kaart precies dezelfde uitlijning krijgt als de voorraadkaarten.
+    Halfronde SVG-snelheidsmeter (niet meer op het dashboard; alleen nog
+    beschikbaar mocht er iemand een volledige gauge willen inbouwen). De
+    productieweergave gebruikt make_otif_zone_bar_svg voor compactheid.
     """
     import math
 
@@ -501,55 +561,49 @@ with tab1:
         df.loc[status_norm.isin(witte_statussen_norm), "Gewicht_effectief_kg"].sum()
     ) if "Status" in df.columns else 0.0
 
-    # Gedeelde opmaak voor de drie kaarten. Door min-height én box-sizing te
-    # zetten krijgen zwarte voorraad, witte voorraad en OTIF exact dezelfde
-    # hoogte, zodat de rij netjes uitgelijnd is.
+    # Gedeelde opmaak voor de drie kaarten. De inhoud van elke kaart heeft
+    # dezelfde structuur (label + waarde + detailregel), waardoor Streamlit
+    # ze automatisch op gelijke hoogte rendert.
     st.markdown(
         """
         <style>
         .cgr-stock-card {
             border: 1px solid #d0d7de;
-            border-radius: 14px;
-            padding: 1.05rem 1.15rem;
+            border-radius: 12px;
+            padding: 0.85rem 1.05rem 0.9rem 1.05rem;
             background: #ffffff;
-            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
             box-sizing: border-box;
             display: flex;
             flex-direction: column;
-            justify-content: space-between;
-            min-height: 240px;
+            gap: 0.35rem;
             height: 100%;
         }
-        .cgr-stock-card-accent-black { border-left: 8px solid #1f2937; }
-        .cgr-stock-card-accent-white { border-left: 8px solid #94a3b8; }
-        .cgr-stock-card-accent-otif  { border-left: 8px solid #16a34a; }
+        .cgr-stock-card-accent-black { border-left: 6px solid #1f2937; }
+        .cgr-stock-card-accent-white { border-left: 6px solid #94a3b8; }
+        .cgr-stock-card-accent-otif  { border-left: 6px solid #16a34a; }
         .cgr-stock-label {
-            font-size: 0.95rem;
+            font-size: 0.86rem;
             color: #475569;
-            font-weight: 650;
-            margin-bottom: 0.35rem;
+            font-weight: 600;
+            letter-spacing: 0.005em;
         }
         .cgr-stock-value {
-            font-size: 2.15rem;
-            line-height: 1.12;
+            font-size: 1.75rem;
+            line-height: 1.05;
             color: #111827;
-            font-weight: 750;
-            margin-bottom: 0.55rem;
+            font-weight: 700;
+        }
+        .cgr-stock-zonebar {
+            margin: 0.05rem 0 0.1rem 0;
+            max-width: 220px;
         }
         .cgr-stock-detail {
-            font-size: 0.88rem;
-            color: #475569;
+            font-size: 0.82rem;
+            color: #64748b;
             line-height: 1.45;
-            margin-top: 0.35rem;
+            margin-top: auto;
         }
-        .cgr-stock-gauge {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 0.15rem 0 0.25rem 0;
-            flex: 1 1 auto;
-        }
-        .cgr-stock-gauge svg { max-height: 130px; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -561,13 +615,11 @@ with tab1:
         st.markdown(
             f"""
             <div class="cgr-stock-card cgr-stock-card-accent-black">
-                <div>
-                    <div class="cgr-stock-label">Zwarte voorraad (kg)</div>
-                    <div class="cgr-stock-value">{format_int(kg_totale_zwarte_voorraad)}</div>
-                </div>
+                <div class="cgr-stock-label">Zwarte voorraad (kg)</div>
+                <div class="cgr-stock-value">{format_int(kg_totale_zwarte_voorraad)}</div>
                 <div class="cgr-stock-detail">
-                    Productie gereed: <strong>{format_int(kg_productie_gereed)}</strong> kg<br>
-                    Binnengemeld / voorbewerking / geblokkeerd: <strong>{format_int(kg_voorbewerking_geblokkeerd)}</strong> kg
+                    Productie gereed: <strong>{format_int(kg_productie_gereed)}</strong> kg &nbsp;·&nbsp;
+                    binnengemeld / voorbewerking / geblokkeerd: <strong>{format_int(kg_voorbewerking_geblokkeerd)}</strong> kg
                 </div>
             </div>
             """,
@@ -578,10 +630,8 @@ with tab1:
         st.markdown(
             f"""
             <div class="cgr-stock-card cgr-stock-card-accent-white">
-                <div>
-                    <div class="cgr-stock-label">Witte voorraad (kg)</div>
-                    <div class="cgr-stock-value">{format_int(kg_witte_voorraad)}</div>
-                </div>
+                <div class="cgr-stock-label">Witte voorraad (kg)</div>
+                <div class="cgr-stock-value">{format_int(kg_witte_voorraad)}</div>
                 <div class="cgr-stock-detail">
                     Statussen: Afgehaald, Nabewerking nog uitvoeren, PC Afgehaald en Coat gereed
                 </div>
@@ -591,9 +641,10 @@ with tab1:
         )
 
     with col_otif:
-        # OTIF: labeltekst + snelheidsmeter (SVG) + samenvattingsregel, alles
-        # binnen dezelfde HTML-kaart zodat de uitlijning identiek is aan de
-        # voorraadkaarten.
+        # OTIF: identieke kaartstructuur als voorraadkaarten (label + waarde
+        # + detailregel), aangevuld met een subtiele 3-zone bar als
+        # miniatuur-snelheidsmeter. De volledige gauge staat in het
+        # OTIF-tabblad voor drill-down.
         peildatum_str = pd.Timestamp(otif_result["peildatum"]).strftime("%d-%m-%Y")
         otif_num_color = _otif_zone_color(otif_result["otif_pct"])
         otif_pct_html = (
@@ -608,20 +659,18 @@ with tab1:
             )
             if otif_result["onbekend"] > 0:
                 samenvatting += f" · {otif_result['onbekend']} onbekend"
-            samenvatting += f" (totaal {otif_result['totaal']} orders)"
+            samenvatting += f" (totaal {otif_result['totaal']})"
         else:
             samenvatting = "Geen orders met deze peildatum in de dataset."
 
-        gauge_svg = make_otif_gauge_svg(otif_result["otif_pct"])
+        zonebar_svg = make_otif_zone_bar_svg(otif_result["otif_pct"])
 
         st.markdown(
             f"""
             <div class="cgr-stock-card cgr-stock-card-accent-otif">
-                <div>
-                    <div class="cgr-stock-label">OTIF · {otif_result['date_column_label']} = {peildatum_str}</div>
-                    <div class="cgr-stock-value" style="color: {otif_num_color};">{otif_pct_html}</div>
-                </div>
-                <div class="cgr-stock-gauge">{gauge_svg}</div>
+                <div class="cgr-stock-label">OTIF · {otif_result['date_column_label']} = {peildatum_str}</div>
+                <div class="cgr-stock-value" style="color: {otif_num_color};">{otif_pct_html}</div>
+                <div class="cgr-stock-zonebar">{zonebar_svg}</div>
                 <div class="cgr-stock-detail">{samenvatting}</div>
             </div>
             """,
