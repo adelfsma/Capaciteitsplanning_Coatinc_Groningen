@@ -1,0 +1,49 @@
+v2.5.2 Compacte KPI-tegels
+
+Aanleiding: gebruikersfeedback op v2.5.1 – de OTIF-kaart bleef groter dan
+de voorraadkaarten omdat de ingebedde snelheidsmeter verticale ruimte
+nodig had. Bovendien nam de KPI-strook te veel plek in bovenaan het
+dashboard, terwijl de focus juist bij de capaciteitsgrafieken moet liggen.
+
+Ontwerpprincipe: identieke inhoudsstructuur = identieke hoogte.
+
+Wijzigingen:
+
+viewer_app.py
+- Nieuwe helper `make_otif_zone_bar_svg`: dunne horizontale 3-zone bar
+  (6 px hoog, ~220 px breed) met een klein driehoekje als indicator van
+  de huidige OTIF-waarde. Vervangt de halfronde SVG-gauge op het
+  dashboard. Neemt vrijwel geen verticale ruimte in beslag.
+- Dashboard-kaarten geherstructureerd naar identieke opzet:
+    label · groot getal · detailregel.
+  De OTIF-kaart heeft daarnaast één regel met de mini-zonebar; dat
+  past ruim binnen de hoogte van één tekstregel.
+- Compactere styling:
+    * Border-radius 14 px → 12 px
+    * Padding 1.05 rem → 0.85 rem
+    * Accent-strip 8 px → 6 px
+    * Value-fontsize 2.15 rem → 1.75 rem
+    * Label-fontsize 0.95 rem → 0.86 rem
+    * Detail-fontsize 0.88 rem → 0.82 rem
+- `min-height` verwijderd; de kaarten trekken hun hoogte nu volledig uit
+  de content, waardoor alle drie automatisch even hoog worden zolang
+  hun structuur identiek is.
+- `make_otif_gauge_svg` (halfronde variant) blijft aanwezig maar wordt
+  niet meer aangeroepen; ongebruikt zonder impact op de runtime.
+- Volledige halfronde snelheidsmeter (matplotlib, met equal-zone verdeling)
+  blijft in het OTIF-tabblad voor drill-down.
+
+shared.py
+- APP_VERSION → v2.5.2
+
+Gemeten kaart-hoogtes (Chromium-render, 1400 px viewport):
+    Kaart 1 (Zwarte):  top=68 px, bottom=196 px, hoogte=128 px
+    Kaart 2 (Witte):   top=68 px, bottom=196 px, hoogte=128 px
+    Kaart 3 (OTIF):    top=68 px, bottom=196 px, hoogte=128 px
+    → Identiek, ~45 % compacter dan de v2.5.1-kaarten (240 px).
+
+Geen wijzigingen in:
+- shared.py OTIF-berekening en peildatum-logica
+- OTIF-tabblad (KPI-metrics, formule-uitleg, detailtabel, Excel-download)
+- manager_app.py (byte-voor-byte identiek)
+- upload/publicatie-flow of vereiste bestanden

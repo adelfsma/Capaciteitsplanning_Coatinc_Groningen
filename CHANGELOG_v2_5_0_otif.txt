@@ -1,0 +1,44 @@
+v2.5.0 OTIF-KPI
+
+Toegevoegd:
+- KPI OTIF (On Time In Full) als snelheidsmeter in het Dashboard-tabblad
+  van de viewer, gepositioneerd naast de bestaande voorraadkaarten.
+- Nieuw tabblad "OTIF" in de viewer met:
+    * kerncijfers (totaal, gereed, te laat, nvt, OTIF %),
+    * grotere gauge met formule-uitleg,
+    * gefilterde detailtabel (op OTIF-status),
+    * Excel-download in de stijl van "Gebruikte gegevens",
+      met twee tabbladen (OTIF-orders + Samenvatting).
+
+shared.py:
+- APP_VERSION → v2.5.0
+- OTIF_STATUS_MAP (case-insensitief) conform bijlage Status_OTIF.xlsx:
+    Ja  : uitgeleverd, Afgehaald, Coat gereed, UB V Gereed
+    Nee : Productie gereed, Geblokkeerd, Opgehangen, PC Opgehangen,
+          UB, Nabewerking nog uitvoeren, meetrapport
+    Nvt : PC Afgehaald
+    Overige statussen → Onbekend (tellen mee in totaal, niet in te laat)
+- Drempels voor de gauge: 96,0 % groen / 80,0 % oranje / < 80 % rood.
+- Nieuwe helpers: map_otif_status, find_originele_leverdatum_column,
+  compute_otif, get_peildatum_from_metadata.
+- load_published_data parseert (indien aanwezig) een "Originele datum"
+  kolom uit de weekexports als Originele_leverdatum. Kolomherkenning
+  is case-insensitief en werkt met alle bekende naamvarianten.
+
+viewer_app.py:
+- Sidebar-sectie "OTIF" met:
+    * peildatum (default = publicatiedatum uit metadata),
+    * (in testomgeving) radio-keuze tussen "Datum" en "Originele datum",
+      alleen als de originele-datum-kolom in de data zit.
+- Voorraadoverzicht → 3-koloms lay-out met de OTIF-snelheidsmeter naast
+  de bestaande zwarte en witte voorraadkaarten.
+
+Berekening (conform gebruikersspecificatie):
+    OTIF = (1 − aantal te laat / totaal aantal orders op peildatum) × 100 %
+
+Uitsluitingen:
+- Reserveringen (Bron_week == "reservering") tellen niet mee.
+- Orders op een andere datum dan de peildatum tellen niet mee.
+
+manager_app.py: geen wijzigingen. De OTIF wordt afgeleid uit de reeds
+gepubliceerde Export.xlsx; de bestaande upload/publicatie-flow volstaat.

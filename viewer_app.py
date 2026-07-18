@@ -10,14 +10,20 @@ from shared import (
     MATERIAALTYPE_ORDER,
     MATERIAALTYPE_DAG_COLS,
     WITTE_VOORRAAD_STATUSSEN,
+    OTIF_GAUGE_GREEN_THRESHOLD,
+    OTIF_GAUGE_ORANGE_THRESHOLD,
     previous_workday,
     load_published_data,
     load_metadata,
     build_dashboard_data,
+    compute_otif,
+    get_peildatum_from_metadata,
+    find_originele_leverdatum_column,
     format_int,
     format_pct,
     render_environment_banner,
     get_page_title,
+    is_test_environment,
 )
 
 st.set_page_config(layout="wide", page_title=get_page_title("Capaciteitsplanning Coatinc Groningen"))
@@ -162,6 +168,284 @@ def make_materiaaltype_matplotlib_chart(day_df: pd.DataFrame):
     return fig
 
 
+def _otif_pct_to_angle(
+    pct: float,
+    threshold_green: float = OTIF_GAUGE_GREEN_THRESHOLD,
+    threshold_orange: float = OTIF_GAUGE_ORANGE_THRESHOLD,
+) -> float:
+    """
+    Zet een OTIF-percentage om naar een arc-hoek volgens een piecewise-lineaire
+    schaal waarbij elke zone (rood, oranje, groen) precies 60° van de
+    halfronde meter beslaat. Zo is het groene gebied altijd goed zichtbaar,
+    ook al is 96–100 % maar een smalle band in de businessdefinitie.
+    De naaldpositie binnen een zone blijft lineair, dus goed afleesbaar.
+    """
+    clip = max(0.0, min(100.0, pct))
+    if clip <= threshold_orange:
+        return 180.0 - (clip / threshold_orange) * 60.0
+    if clip <= threshold_green:
+        return 120.0 - ((clip - threshold_orange) / (threshold_green - threshold_orange)) * 60.0
+    return 60.0 - ((clip - threshold_green) / (100.0 - threshold_green)) * 60.0
+
+
+def _otif_zone_color(
+    pct: float | None,
+    threshold_green: float = OTIF_GAUGE_GREEN_THRESHOLD,
+    threshold_orange: float = OTIF_GAUGE_ORANGE_THRESHOLD,
+) -> str:
+    """Bepaal de kleur (groen/oranje/rood/grijs) voor een OTIF-waarde."""
+    if pct is None:
+        return "#6b7280"
+    if pct >= threshold_green:
+        return "#16a34a"
+    if pct >= threshold_orange:
+        return "#f59e0b"
+    return "#dc2626"
+
+
+def make_otif_gauge(
+    otif_pct: float | None,
+    threshold_green: float = OTIF_GAUGE_GREEN_THRESHOLD,
+    threshold_orange: float = OTIF_GAUGE_ORANGE_THRESHOLD,
+    title: str = "OTIF",
+    figsize: tuple[float, float] = (5.2, 3.4),
+    show_value: bool = True,
+    show_title: bool = True,
+):
+    """
+    Matplotlib-variant van de OTIF-snelheidsmeter voor het OTIF-tabblad.
+    - < 80 %             → rood
+    - 80 % – < 96 %      → oranje
+    - ≥ 96 %             → groen
+    De arc is verdeeld in drie even brede zones (elk 60°); binnen elke zone
+    is de naaldpositie lineair.
+    """
+    from matplotlib.patches import Wedge
+
+    ROOD   = "#dc2626"
+    ORANJE = "#f59e0b"
+    GROEN  = "#16a34a"
+    GRIJS  = "#e5e7eb"
+    DONKER = "#111827"
+    MIDGRIJS = "#6b7280"
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_xlim(-1.25, 1.25)
+    ax.set_ylim(-0.55, 1.25)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    outer_r = 1.0
+    ring_width = 0.28
+
+    # Achtergrondring om ontbrekende data netjes te tonen.
+    ax.add_patch(Wedge((0, 0), outer_r, 0, 180, width=ring_width, facecolor=GRIJS, edgecolor="none"))
+
+    # Drie even brede zones op vaste posities.
+    ax.add_patch(Wedge((0, 0), outer_r, 120, 180, width=ring_width, facecolor=ROOD,   edgecolor="none"))
+    ax.add_patch(Wedge((0, 0), outer_r,  60, 120, width=ring_width, facecolor=ORANJE, edgecolor="none"))
+    ax.add_patch(Wedge((0, 0), outer_r,   0,  60, width=ring_width, facecolor=GROEN,  edgecolor="none"))
+
+    # Labels op de zonegrenzen + intermediair per zone voor context.
+    for pct_val in (0, threshold_orange / 2, threshold_orange,
+                    (threshold_orange + threshold_green) / 2, threshold_green,
+                    (threshold_green + 100) / 2, 100):
+        angle_deg = _otif_pct_to_angle(pct_val, threshold_green, threshold_orange)
+        angle_rad = np.deg2rad(angle_deg)
+        x1 = (outer_r - ring_width) * np.cos(angle_rad)
+        y1 = (outer_r - ring_width) * np.sin(angle_rad)
+        x2 = (outer_r - ring_width - 0.06) * np.cos(angle_rad)
+        y2 = (outer_r - ring_width - 0.06) * np.sin(angle_rad)
+        ax.plot([x1, x2], [y1, y2], color=DONKER, linewidth=1.1)
+        xl = (outer_r - ring_width - 0.16) * np.cos(angle_rad)
+        yl = (outer_r - ring_width - 0.16) * np.sin(angle_rad)
+        # Belangrijkste labels dikker, halverwege-labels wat lichter.
+        is_boundary = pct_val in (0, threshold_orange, threshold_green, 100)
+        ax.text(
+            xl, yl,
+            f"{pct_val:.0f}" if pct_val == int(pct_val) else f"{pct_val:.1f}",
+            ha="center", va="center",
+            fontsize=8 if is_boundary else 7,
+            color=DONKER if is_boundary else MIDGRIJS,
+            fontweight="bold" if is_boundary else "normal",
+        )
+
+    if show_title:
+        ax.text(0, 1.14, title, ha="center", va="center", fontsize=13, fontweight="bold", color=DONKER)
+
+    if otif_pct is None:
+        ax.plot([0], [0], marker="o", color=MIDGRIJS, markersize=9)
+        if show_value:
+            ax.text(0, -0.28, "geen data", ha="center", va="center",
+                    fontsize=14, fontweight="bold", color=MIDGRIJS)
+        return fig
+
+    needle_angle = np.deg2rad(_otif_pct_to_angle(float(otif_pct), threshold_green, threshold_orange))
+    needle_len = outer_r - ring_width - 0.02
+    nx = needle_len * np.cos(needle_angle)
+    ny = needle_len * np.sin(needle_angle)
+    ax.plot([0, nx], [0, ny], color=DONKER, linewidth=2.8, solid_capstyle="round")
+    ax.plot([0], [0], marker="o", color=DONKER, markersize=11)
+
+    if show_value:
+        num_color = _otif_zone_color(otif_pct, threshold_green, threshold_orange)
+        ax.text(0, -0.30, f"{otif_pct:.1f}%", ha="center", va="center",
+                fontsize=24, fontweight="bold", color=num_color)
+
+    fig.tight_layout()
+    return fig
+
+
+def make_otif_zone_bar_svg(
+    otif_pct: float | None,
+    threshold_green: float = OTIF_GAUGE_GREEN_THRESHOLD,
+    threshold_orange: float = OTIF_GAUGE_ORANGE_THRESHOLD,
+    width: int = 260,
+    height: int = 18,
+) -> str:
+    """
+    Compacte horizontale 3-zone bar (mini-snelheidsmeter) voor gebruik in de
+    OTIF-dashboardkaart. De bar bestaat uit drie gelijke segmenten
+    (rood/oranje/groen) en een kleine driehoek als indicator van de huidige
+    OTIF-waarde. Blijft ruim binnen de hoogte van een tekstregel, zodat de
+    OTIF-kaart precies dezelfde totale hoogte krijgt als de voorraadkaarten.
+    """
+    ROOD, ORANJE, GROEN = "#dc2626", "#f59e0b", "#16a34a"
+    DONKER, MIDGRIJS = "#111827", "#6b7280"
+
+    bar_y = 0
+    bar_h = 6
+    seg_w = width / 3.0
+
+    def pct_to_x(pct: float) -> float:
+        clip = max(0.0, min(100.0, pct))
+        if clip <= threshold_orange:
+            return (clip / threshold_orange) * seg_w
+        if clip <= threshold_green:
+            return seg_w + ((clip - threshold_orange) / (threshold_green - threshold_orange)) * seg_w
+        return 2 * seg_w + ((clip - threshold_green) / (100.0 - threshold_green)) * seg_w
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'width="100%" style="display:block; max-width:100%; height:auto;" '
+        f'aria-label="OTIF zone-indicator">'
+    ]
+    # Drie zones. Buitenste hoeken licht afgerond voor een verfijnde look.
+    parts.append(f'<rect x="0" y="{bar_y}" width="{seg_w:.2f}" height="{bar_h}" '
+                 f'fill="{ROOD}" rx="2" ry="2" />')
+    parts.append(f'<rect x="{seg_w:.2f}" y="{bar_y}" width="{seg_w:.2f}" height="{bar_h}" '
+                 f'fill="{ORANJE}" />')
+    parts.append(f'<rect x="{2*seg_w:.2f}" y="{bar_y}" width="{seg_w:.2f}" height="{bar_h}" '
+                 f'fill="{GROEN}" rx="2" ry="2" />')
+
+    # Indicator: driehoek onder de bar wijzend naar de huidige waarde.
+    if otif_pct is None:
+        cx = width / 2.0
+        parts.append(
+            f'<polygon points="{cx-3.5:.2f},{bar_h+11} {cx+3.5:.2f},{bar_h+11} '
+            f'{cx:.2f},{bar_h+3}" fill="{MIDGRIJS}" />'
+        )
+    else:
+        x = pct_to_x(float(otif_pct))
+        parts.append(
+            f'<polygon points="{x-4:.2f},{bar_h+11} {x+4:.2f},{bar_h+11} '
+            f'{x:.2f},{bar_h+3}" fill="{DONKER}" />'
+        )
+
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def make_otif_gauge_svg(
+    otif_pct: float | None,
+    threshold_green: float = OTIF_GAUGE_GREEN_THRESHOLD,
+    threshold_orange: float = OTIF_GAUGE_ORANGE_THRESHOLD,
+    width: int = 300,
+    height: int = 160,
+) -> str:
+    """
+    Halfronde SVG-snelheidsmeter (niet meer op het dashboard; alleen nog
+    beschikbaar mocht er iemand een volledige gauge willen inbouwen). De
+    productieweergave gebruikt make_otif_zone_bar_svg voor compactheid.
+    """
+    import math
+
+    ROOD, ORANJE, GROEN = "#dc2626", "#f59e0b", "#16a34a"
+    DONKER, MIDGRIJS = "#111827", "#6b7280"
+
+    cx = width / 2
+    cy = height * 0.86
+    r_outer = min(width * 0.40, height * 0.72)
+    r_inner = r_outer * 0.60
+    label_r = r_inner - 12
+
+    def polar(r: float, a_deg: float) -> tuple[float, float]:
+        rad = math.radians(a_deg)
+        return (cx + r * math.cos(rad), cy - r * math.sin(rad))
+
+    def ring_segment_path(a_start: float, a_end: float, steps: int = 32) -> str:
+        outer_pts, inner_pts = [], []
+        for i in range(steps + 1):
+            t = i / steps
+            a = a_start + t * (a_end - a_start)
+            outer_pts.append(polar(r_outer, a))
+            inner_pts.append(polar(r_inner, a))
+        parts = [f"M {outer_pts[0][0]:.2f},{outer_pts[0][1]:.2f}"]
+        for x, y in outer_pts[1:]:
+            parts.append(f"L {x:.2f},{y:.2f}")
+        for x, y in reversed(inner_pts):
+            parts.append(f"L {x:.2f},{y:.2f}")
+        parts.append("Z")
+        return " ".join(parts)
+
+    svg_parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'width="100%" style="display:block; max-width:100%; height:auto;" '
+        f'aria-label="OTIF snelheidsmeter">'
+    ]
+
+    # Zones (elk 60° op de arc).
+    svg_parts.append(f'<path d="{ring_segment_path(180, 120)}" fill="{ROOD}" />')
+    svg_parts.append(f'<path d="{ring_segment_path(120,  60)}" fill="{ORANJE}" />')
+    svg_parts.append(f'<path d="{ring_segment_path( 60,   0)}" fill="{GROEN}" />')
+
+    # Streepjes en labels op de zonegrenzen.
+    for pct_val in (0, threshold_orange, threshold_green, 100):
+        a = _otif_pct_to_angle(pct_val, threshold_green, threshold_orange)
+        x1, y1 = polar(r_inner, a)
+        x2, y2 = polar(r_inner - 5, a)
+        svg_parts.append(
+            f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
+            f'stroke="{DONKER}" stroke-width="1.2" />'
+        )
+        xl, yl = polar(label_r, a)
+        svg_parts.append(
+            f'<text x="{xl:.2f}" y="{yl:.2f}" text-anchor="middle" '
+            f'dominant-baseline="central" font-size="10" font-weight="600" '
+            f'fill="{DONKER}" font-family="sans-serif">{int(pct_val)}</text>'
+        )
+
+    # Naald.
+    if otif_pct is None:
+        svg_parts.append(
+            f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="6" fill="{MIDGRIJS}" />'
+        )
+    else:
+        a = _otif_pct_to_angle(float(otif_pct), threshold_green, threshold_orange)
+        needle_len = r_outer - 4
+        nx, ny = polar(needle_len, a)
+        svg_parts.append(
+            f'<line x1="{cx:.2f}" y1="{cy:.2f}" x2="{nx:.2f}" y2="{ny:.2f}" '
+            f'stroke="{DONKER}" stroke-width="3" stroke-linecap="round" />'
+        )
+        svg_parts.append(
+            f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="7" fill="{DONKER}" />'
+        )
+
+    svg_parts.append("</svg>")
+    return "".join(svg_parts)
+
+
 if os.path.exists("logo_coatinc_groningen.png"):
     st.sidebar.image("logo_coatinc_groningen.png", width=200)
 st.sidebar.caption(APP_VERSION)
@@ -196,10 +480,68 @@ except Exception as e:
     st.stop()
 
 df, df_plan, dag, week, advies_datum = build_dashboard_data(df_raw, holiday_df, startdatum, capaciteit_kg, offset, kg_per_traverse)
-tab1, tab2, tab3 = st.tabs(["Dashboard", "Gebruikte gegevens", "Debug"])
+
+# ── OTIF-instellingen ────────────────────────────────────────────────────────
+# De peildatum is standaard de dag van de laatste publicatie (het exportmoment
+# van de brondata). De gebruiker kan hem zo nodig aanpassen voor terugkijkende
+# analyses.
+st.sidebar.markdown("---")
+st.sidebar.subheader("OTIF")
+default_peildatum = get_peildatum_from_metadata(meta)
+otif_peildatum = st.sidebar.date_input(
+    "Peildatum OTIF",
+    value=default_peildatum,
+    help=(
+        "Standaard de dag waarop de brondata is geëxporteerd/gepubliceerd. "
+        "Orders met deze datum in 'Datum' (of 'Originele datum') worden getoetst."
+    ),
+)
+
+# Vergelijkingskolom kiezen. In de testomgeving mag tussen 'Datum' en
+# 'Originele datum' worden geschakeld; in productie blijft de businessdefinitie
+# 'Datum'. Als de kolom 'Originele_leverdatum' niet in de data zit, is de
+# optie automatisch niet beschikbaar.
+_originele_beschikbaar = (
+    "Originele_leverdatum" in df.columns
+    and pd.to_datetime(df["Originele_leverdatum"], errors="coerce").notna().any()
+)
+
+otif_datum_keuzes = {"Datum (leverdatum)": ("Leverdatum", "Datum")}
+if _originele_beschikbaar:
+    otif_datum_keuzes["Originele datum"] = ("Originele_leverdatum", "Originele datum")
+
+if is_test_environment() and len(otif_datum_keuzes) > 1:
+    otif_datum_keuze_label = st.sidebar.radio(
+        "OTIF vergelijken met",
+        list(otif_datum_keuzes.keys()),
+        index=0,
+        help=(
+            "In de testomgeving kan zowel tegen de huidige 'Datum' als tegen de "
+            "'Originele datum' getoetst worden om beide varianten te evalueren."
+        ),
+    )
+else:
+    # Buiten test of zonder Originele datum: default op de businessdefinitie.
+    otif_datum_keuze_label = "Datum (leverdatum)"
+    if is_test_environment() and not _originele_beschikbaar:
+        st.sidebar.caption(
+            "ℹ️ Originele datum niet aangetroffen in de weekexports; "
+            "alleen vergelijking tegen 'Datum' beschikbaar."
+        )
+
+otif_date_column, otif_date_label = otif_datum_keuzes[otif_datum_keuze_label]
+
+otif_result = compute_otif(
+    df,
+    peildatum=otif_peildatum,
+    date_column=otif_date_column,
+    date_column_label=otif_date_label,
+)
+
+tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Gebruikte gegevens", "OTIF", "Debug"])
 
 with tab1:
-    st.subheader("Voorraadoverzicht")
+    st.subheader("Voorraadoverzicht en OTIF")
 
     # Zwarte voorraad: momentopname o.b.v. Status, los van de planningshorizon.
     # "Totale zwarte voorraad" = som van de twee subcategorieën hieronder.
@@ -219,55 +561,74 @@ with tab1:
         df.loc[status_norm.isin(witte_statussen_norm), "Gewicht_effectief_kg"].sum()
     ) if "Status" in df.columns else 0.0
 
+    # Gedeelde opmaak voor de drie kaarten. De inhoud van elke kaart heeft
+    # dezelfde structuur (label + waarde + detailregel), waardoor Streamlit
+    # ze automatisch op gelijke hoogte rendert.
     st.markdown(
-        f"""
+        """
         <style>
-        .cgr-stock-grid {{
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 1rem;
-            margin: 0.25rem 0 1.2rem 0;
-        }}
-        .cgr-stock-card {{
+        .cgr-stock-card {
             border: 1px solid #d0d7de;
-            border-radius: 14px;
-            padding: 1.05rem 1.15rem;
+            border-radius: 12px;
+            padding: 0.85rem 1.05rem 0.9rem 1.05rem;
             background: #ffffff;
-            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
-        }}
-        .cgr-stock-card-accent-black {{ border-left: 8px solid #1f2937; }}
-        .cgr-stock-card-accent-white {{ border-left: 8px solid #94a3b8; }}
-        .cgr-stock-label {{
-            font-size: 0.95rem;
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+            height: 100%;
+        }
+        .cgr-stock-card-accent-black { border-left: 6px solid #1f2937; }
+        .cgr-stock-card-accent-white { border-left: 6px solid #94a3b8; }
+        .cgr-stock-card-accent-otif  { border-left: 6px solid #16a34a; }
+        .cgr-stock-label {
+            font-size: 0.86rem;
             color: #475569;
-            font-weight: 650;
-            margin-bottom: 0.25rem;
-        }}
-        .cgr-stock-value {{
-            font-size: 2.15rem;
-            line-height: 1.12;
+            font-weight: 600;
+            letter-spacing: 0.005em;
+        }
+        .cgr-stock-value {
+            font-size: 1.75rem;
+            line-height: 1.05;
             color: #111827;
-            font-weight: 750;
-            margin-bottom: 0.7rem;
-        }}
-        .cgr-stock-detail {{
-            font-size: 0.9rem;
-            color: #475569;
+            font-weight: 700;
+        }
+        .cgr-stock-zonebar {
+            margin: 0.05rem 0 0.1rem 0;
+            max-width: 220px;
+        }
+        .cgr-stock-detail {
+            font-size: 0.82rem;
+            color: #64748b;
             line-height: 1.45;
-        }}
-        @media (max-width: 900px) {{
-            .cgr-stock-grid {{ grid-template-columns: 1fr; }}
-        }}
+            margin-top: auto;
+        }
         </style>
-        <div class="cgr-stock-grid">
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col_zwart, col_wit, col_otif = st.columns(3)
+
+    with col_zwart:
+        st.markdown(
+            f"""
             <div class="cgr-stock-card cgr-stock-card-accent-black">
                 <div class="cgr-stock-label">Zwarte voorraad (kg)</div>
                 <div class="cgr-stock-value">{format_int(kg_totale_zwarte_voorraad)}</div>
                 <div class="cgr-stock-detail">
-                    Productie gereed: <strong>{format_int(kg_productie_gereed)}</strong> kg<br>
-                    Binnengemeld / voorbewerking / geblokkeerd: <strong>{format_int(kg_voorbewerking_geblokkeerd)}</strong> kg
+                    Productie gereed: <strong>{format_int(kg_productie_gereed)}</strong> kg &nbsp;·&nbsp;
+                    binnengemeld / voorbewerking / geblokkeerd: <strong>{format_int(kg_voorbewerking_geblokkeerd)}</strong> kg
                 </div>
             </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col_wit:
+        st.markdown(
+            f"""
             <div class="cgr-stock-card cgr-stock-card-accent-white">
                 <div class="cgr-stock-label">Witte voorraad (kg)</div>
                 <div class="cgr-stock-value">{format_int(kg_witte_voorraad)}</div>
@@ -275,10 +636,46 @@ with tab1:
                     Statussen: Afgehaald, Nabewerking nog uitvoeren, PC Afgehaald en Coat gereed
                 </div>
             </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col_otif:
+        # OTIF: identieke kaartstructuur als voorraadkaarten (label + waarde
+        # + detailregel), aangevuld met een subtiele 3-zone bar als
+        # miniatuur-snelheidsmeter. De volledige gauge staat in het
+        # OTIF-tabblad voor drill-down.
+        peildatum_str = pd.Timestamp(otif_result["peildatum"]).strftime("%d-%m-%Y")
+        otif_num_color = _otif_zone_color(otif_result["otif_pct"])
+        otif_pct_html = (
+            "geen data" if otif_result["otif_pct"] is None
+            else f"{otif_result['otif_pct']:.1f}%"
+        )
+        if otif_result["totaal"] > 0:
+            samenvatting = (
+                f"{otif_result['gereed']} op tijd · "
+                f"{otif_result['niet_gereed']} te laat · "
+                f"{otif_result['nvt']} nvt"
+            )
+            if otif_result["onbekend"] > 0:
+                samenvatting += f" · {otif_result['onbekend']} onbekend"
+            samenvatting += f" (totaal {otif_result['totaal']})"
+        else:
+            samenvatting = "Geen orders met deze peildatum in de dataset."
+
+        zonebar_svg = make_otif_zone_bar_svg(otif_result["otif_pct"])
+
+        st.markdown(
+            f"""
+            <div class="cgr-stock-card cgr-stock-card-accent-otif">
+                <div class="cgr-stock-label">OTIF · {otif_result['date_column_label']} = {peildatum_str}</div>
+                <div class="cgr-stock-value" style="color: {otif_num_color};">{otif_pct_html}</div>
+                <div class="cgr-stock-zonebar">{zonebar_svg}</div>
+                <div class="cgr-stock-detail">{samenvatting}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     st.subheader("Eerstvolgende leverdatum")
     st.markdown(f'<div style="padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid #d0d7de; background-color: #f6f8fa; margin-bottom: 0.75rem;"><div style="font-size: 2.2rem; font-weight: 700;">{advies_datum.strftime("%d-%m-%Y")}</div></div>', unsafe_allow_html=True)
@@ -431,6 +828,152 @@ with tab2:
     )
 
 with tab3:
+    st.subheader("OTIF – On Time In Full")
+
+    peildatum_str = pd.Timestamp(otif_result["peildatum"]).strftime("%d-%m-%Y")
+    st.caption(
+        f"Peildatum: **{peildatum_str}** · vergeleken met **{otif_result['date_column_label']}** · "
+        f"reserveringen worden niet meegeteld."
+    )
+
+    # Kerngetallen boven de tabel.
+    kpi_col1, kpi_col2, kpi_col3, kpi_col4, kpi_col5 = st.columns(5)
+    kpi_col1.metric("Totaal orders", f"{otif_result['totaal']:,}".replace(",", "."))
+    kpi_col2.metric("Gereed (Ja)", f"{otif_result['gereed']:,}".replace(",", "."))
+    kpi_col3.metric("Te laat (Nee)", f"{otif_result['niet_gereed']:,}".replace(",", "."))
+    kpi_col4.metric("Nvt", f"{otif_result['nvt']:,}".replace(",", "."))
+    otif_pct_str = "n.v.t." if otif_result["otif_pct"] is None else f"{otif_result['otif_pct']:.1f}%"
+    kpi_col5.metric("OTIF", otif_pct_str)
+
+    # Gauge groter tonen naast een korte formule-uitleg.
+    gauge_col, uitleg_col = st.columns([1, 1.1])
+    with gauge_col:
+        st.pyplot(
+            make_otif_gauge(
+                otif_result["otif_pct"],
+                title=f"OTIF · {otif_result['date_column_label']} = {peildatum_str}",
+                figsize=(6.0, 4.0),
+            ),
+            clear_figure=True,
+            use_container_width=True,
+        )
+    with uitleg_col:
+        st.markdown(
+            f"""
+**Berekening**  
+OTIF = (1 − *aantal te laat* / *totaal aantal orders*) × 100 %  
+= (1 − {otif_result['niet_gereed']} / {max(otif_result['totaal'], 1)}) × 100 %  
+= **{otif_pct_str}**
+
+**Status → OTIF-mapping** (zie Status_OTIF.xlsx)
+- **Ja** (op tijd): uitgeleverd, Afgehaald, Coat gereed, UB V Gereed
+- **Nee** (te laat): Productie gereed, Geblokkeerd, Opgehangen, PC Opgehangen, UB, Nabewerking nog uitvoeren, meetrapport
+- **Nvt**: PC Afgehaald
+
+Groen op de meter vanaf **{OTIF_GAUGE_GREEN_THRESHOLD:.0f}%**, oranje vanaf **{OTIF_GAUGE_ORANGE_THRESHOLD:.0f}%**, onder deze grens rood.
+
+*De schaal is bewust niet-lineair: elke zone (rood, oranje, groen) beslaat een even groot deel van de meter, zodat de groene zone (96–100 %) duidelijk zichtbaar blijft. Binnen elke zone is de naaldpositie wél lineair.*
+"""
+        )
+
+    st.markdown("---")
+    st.subheader("Gebruikte gegevens (OTIF)")
+
+    otif_orders = otif_result["orders"]
+    if otif_orders.empty:
+        st.info(
+            "Geen orders gevonden met de gekozen peildatum in "
+            f"'{otif_result['date_column_label']}'. Controleer eventueel of de "
+            "juiste peildatum in de zijbalk is geselecteerd."
+        )
+    else:
+        # Kolomkeuze: aansluiten bij 'Gebruikte gegevens' voor herkenbaarheid.
+        otif_cols = [
+            "Bronbestand", "Bron_week", "Nummer", "Ordernummer_base",
+            "Debiteurnummer", "Klantnaam",
+            "Segment_debtor_export", "Materiaaltype",
+            "Datum", "Leverdatum", "Originele_leverdatum",
+            "Status", "OTIF_status", "Verzinkstatus",
+            "Gewicht_effectief_kg", "Gewicht_bron",
+        ]
+        otif_cols = [c for c in otif_cols if c in otif_orders.columns]
+        otif_orders_display = otif_orders[otif_cols].copy()
+
+        # Filter op OTIF-status voor snelle drill-down.
+        f_col1, f_col2 = st.columns([1, 3])
+        with f_col1:
+            otif_status_opties = ["Ja", "Nee", "Nvt", "Onbekend"]
+            beschikbare_status = [s for s in otif_status_opties if s in set(otif_orders_display["OTIF_status"].astype(str))]
+            selected_otif_status = st.multiselect(
+                "OTIF-status",
+                options=beschikbare_status,
+                default=beschikbare_status,
+            )
+
+        if selected_otif_status:
+            otif_orders_display = otif_orders_display[otif_orders_display["OTIF_status"].astype(str).isin(selected_otif_status)]
+
+        # Datums netjes weergeven.
+        for c in ("Datum", "Leverdatum", "Originele_leverdatum"):
+            if c in otif_orders_display.columns:
+                otif_orders_display[c] = pd.to_datetime(otif_orders_display[c], errors="coerce").dt.date
+        if "Gewicht_effectief_kg" in otif_orders_display.columns:
+            otif_orders_display["Gewicht_effectief_kg"] = otif_orders_display["Gewicht_effectief_kg"].round(2)
+
+        def _color_otif_row(row):
+            status_value = str(row.get("OTIF_status", ""))
+            if status_value == "Ja":
+                return ["background-color: rgba(22, 163, 74, 0.10)"] * len(row)
+            if status_value == "Nee":
+                return ["background-color: rgba(220, 38, 38, 0.12)"] * len(row)
+            if status_value == "Nvt":
+                return ["background-color: rgba(148, 163, 184, 0.15)"] * len(row)
+            return [""] * len(row)
+
+        st.caption(f"Getoonde regels: {len(otif_orders_display):,}".replace(",", "."))
+        st.dataframe(
+            otif_orders_display.style.apply(_color_otif_row, axis=1),
+            width="stretch",
+            hide_index=True,
+        )
+
+        # ── Excel-download van de OTIF-tabel ──────────────────────────────
+        import io
+        otif_pct_excel = (
+            "n.v.t." if otif_result["otif_pct"] is None
+            else round(otif_result["otif_pct"], 2)
+        )
+        otif_xlsx_buffer = io.BytesIO()
+        with pd.ExcelWriter(otif_xlsx_buffer, engine="openpyxl") as writer:
+            otif_orders_display.to_excel(writer, index=False, sheet_name="OTIF-orders")
+            # Samenvatting op tweede tabblad, zodat het bestand op zichzelf leesbaar is.
+            samenvatting_df = pd.DataFrame(
+                [
+                    {"Metric": "Peildatum",             "Waarde": peildatum_str},
+                    {"Metric": "Vergeleken met",        "Waarde": otif_result["date_column_label"]},
+                    {"Metric": "Totaal orders",         "Waarde": otif_result["totaal"]},
+                    {"Metric": "Gereed (Ja)",           "Waarde": otif_result["gereed"]},
+                    {"Metric": "Te laat (Nee)",         "Waarde": otif_result["niet_gereed"]},
+                    {"Metric": "Nvt",                   "Waarde": otif_result["nvt"]},
+                    {"Metric": "Onbekend",              "Waarde": otif_result["onbekend"]},
+                    {"Metric": "OTIF (%)",              "Waarde": otif_pct_excel},
+                    {"Metric": "Drempel groen (%)",     "Waarde": OTIF_GAUGE_GREEN_THRESHOLD},
+                    {"Metric": "Drempel oranje (%)",    "Waarde": OTIF_GAUGE_ORANGE_THRESHOLD},
+                ]
+            )
+            samenvatting_df.to_excel(writer, index=False, sheet_name="Samenvatting")
+        otif_xlsx_buffer.seek(0)
+        st.download_button(
+            label="📥 Download OTIF-gegevens als Excel (.xlsx)",
+            data=otif_xlsx_buffer,
+            file_name=(
+                f"otif_{otif_result['date_column']}_"
+                f"{pd.Timestamp(otif_result['peildatum']).strftime('%Y%m%d')}.xlsx"
+            ),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+with tab4:
     st.subheader("Debug samenvatting")
     debug_rows = [
         {"Categorie":"Instellingen","Omschrijving":"Startdatum rapport","Waarde":str(startdatum)},

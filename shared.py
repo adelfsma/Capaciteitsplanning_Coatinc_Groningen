@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.4.3"
+APP_VERSION = "v2.5.2"
 
 
 def get_app_environment() -> str:
@@ -123,6 +123,48 @@ WITTE_VOORRAAD_STATUSSEN = {
     "PC Afgehaald",
     "Coat gereed",
 }
+
+# ── OTIF (On Time In Full) ────────────────────────────────────────────────────
+# Mapping van de ruwe Status-waarde naar de OTIF-uitkomst per order.
+#   - 'Ja'      → order is gereed op tijd
+#   - 'Nee'     → order is (nog) niet gereed en telt dus als 'te laat'
+#   - 'Nvt'     → order valt buiten de OTIF-noemer (bijv. al opgehaald PC)
+# Statussen die niet in deze map staan krijgen 'Onbekend'; die tellen mee in
+# het totaal (conform gebruikersformule) maar hebben geen impact op 'te laat'.
+# Matching gebeurt case-insensitief.
+OTIF_STATUS_MAP = {
+    "uitgeleverd":               "Ja",
+    "afgehaald":                 "Ja",
+    "coat gereed":               "Ja",
+    "ub v gereed":               "Ja",
+    "pc afgehaald":              "Nvt",
+    "productie gereed":          "Nee",
+    "geblokkeerd":               "Nee",
+    "opgehangen":                "Nee",
+    "pc opgehangen":             "Nee",
+    "ub":                        "Nee",
+    "nabewerking nog uitvoeren": "Nee",
+    "meetrapport":               "Nee",
+}
+
+# Drempels voor de OTIF-snelheidsmeter in het dashboard.
+OTIF_GAUGE_GREEN_THRESHOLD  = 96.0   # ≥ dit percentage: groen
+OTIF_GAUGE_ORANGE_THRESHOLD = 80.0   # ≥ dit percentage: oranje (anders rood)
+
+# Kandidaat-kolomnamen voor de 'originele leverdatum' in de weekexports.
+# De echte kolomnaam wisselt per bronsysteem; in de testomgeving kan tegen
+# deze datum vergeleken worden in plaats van tegen 'Datum'.
+ORIGINELE_LEVERDATUM_CANDIDATES = [
+    "Originele datum",
+    "Oorspronkelijke datum",
+    "Originele leverdatum",
+    "Oorspronkelijke leverdatum",
+    "OrigineleDatum",
+    "OrigineleLeverdatum",
+    "Datum origineel",
+    "Origineel Datum",
+    "Origineel leverdatum",
+]
 
 NL_DAY_ABBR = {0: "ma", 1: "di", 2: "wo", 3: "do", 4: "vr", 5: "za", 6: "zo"}
 
@@ -678,6 +720,18 @@ def load_published_data():
     # ── 3. Basiskolommen aanmaken ─────────────────────────────────────────
     export["Gewicht_export_kg"] = coerce_numeric(export["Gewicht"])
     export["Leverdatum"] = pd.to_datetime(export["Datum"], dayfirst=True, errors="coerce")
+
+    # Originele leverdatum (optioneel; wordt in de testomgeving als alternatief
+    # peildatum-referentie voor OTIF gebruikt). Kolomnaam wisselt per bron; we
+    # zoeken hem case-insensitief op basis van bekende kandidaten.
+    originele_col = find_originele_leverdatum_column(export)
+    if originele_col:
+        export["Originele_leverdatum"] = pd.to_datetime(
+            export[originele_col], dayfirst=True, errors="coerce"
+        )
+    else:
+        export["Originele_leverdatum"] = pd.NaT
+
     export["Verzinkstatus"] = export["Status"].map(STATUS_MAP)
     export["Ordernummer_base"] = coerce_numeric(
         export["Nummer"].astype(str).str.extract(r"(\d+)")[0]
@@ -1113,3 +1167,138 @@ def build_dashboard_data(
 
     advies_datum = calculate_advice_date(dag, today_ts, holiday_dates)
     return df, df_plan, dag, week, advies_datum
+
+
+# ── OTIF helpers (KPI: percentage orders op tijd gereed) ──────────────────────
+
+def map_otif_status(status) -> str:
+    """
+    Vertaal een ruwe Status-waarde naar de OTIF-uitkomst 'Ja', 'Nee', 'Nvt'
+    of 'Onbekend'. Matching is case-insensitief.
+    """
+    if pd.isna(status):
+        return "Onbekend"
+    key = str(status).strip().casefold()
+    return OTIF_STATUS_MAP.get(key, "Onbekend")
+
+
+def find_originele_leverdatum_column(df: pd.DataFrame) -> str | None:
+    """
+    Zoek in `df` een kolom die de originele leverdatum bevat. Retourneert de
+    (originele) kolomnaam of None als geen kandidaat gevonden is.
+    """
+    if df is None or df.empty:
+        return None
+    return _find_first_existing_column(df, ORIGINELE_LEVERDATUM_CANDIDATES)
+
+
+def _empty_otif_result(peildatum, date_column: str, date_column_label: str) -> dict:
+    return {
+        "totaal": 0,
+        "gereed": 0,
+        "niet_gereed": 0,
+        "nvt": 0,
+        "onbekend": 0,
+        "otif_pct": None,
+        "peildatum": peildatum,
+        "date_column": date_column,
+        "date_column_label": date_column_label,
+        "orders": pd.DataFrame(),
+    }
+
+
+def compute_otif(
+    merged: pd.DataFrame,
+    peildatum,
+    date_column: str = "Leverdatum",
+    date_column_label: str | None = None,
+) -> dict:
+    """
+    Bereken de OTIF-KPI over orders waarvan de te toetsen datum gelijk is aan
+    de peildatum.
+
+    Uitgangspunten:
+    - Reserveringen (Bron_week == 'reservering') worden niet meegeteld; dit
+      zijn planningsobjecten, geen orders in productie.
+    - De 'peildatum' is standaard de dag van de laatste publicatie (de dag
+      waarop de data is geëxporteerd/geüpload).
+    - `date_column` bepaalt welk datumveld tegen de peildatum wordt gehouden:
+        * 'Leverdatum'           → conform de 'Datum' uit de weekexports
+        * 'Originele_leverdatum' → variant t.o.v. de originele afspraakdatum
+
+    Formule conform gebruikersspecificatie:
+        OTIF = (1 - aantal te laat / totaal aantal orders) * 100 %
+
+    Waar 'totaal' alle orders van de peildatum betreft (inclusief Nvt en
+    Onbekend) en 'te laat' het aantal orders met OTIF-status = 'Nee'.
+    """
+    label = date_column_label or date_column
+    if merged is None or merged.empty or date_column not in merged.columns:
+        return _empty_otif_result(peildatum, date_column, label)
+
+    df = merged.copy()
+
+    # Reserveringen zijn nog geen 'in productie' orders en tellen niet mee.
+    if "Bron_week" in df.columns:
+        df = df[df["Bron_week"].astype(str).str.strip().str.lower() != "reservering"].copy()
+
+    peil_ts = pd.Timestamp(peildatum).normalize()
+    date_series = pd.to_datetime(df[date_column], errors="coerce")
+    mask = date_series.dt.normalize() == peil_ts
+
+    subset = df.loc[mask].copy()
+    if subset.empty or "Status" not in subset.columns:
+        return _empty_otif_result(peildatum, date_column, label)
+
+    subset["OTIF_status"] = subset["Status"].apply(map_otif_status)
+
+    gereed      = int((subset["OTIF_status"] == "Ja").sum())
+    niet_gereed = int((subset["OTIF_status"] == "Nee").sum())
+    nvt         = int((subset["OTIF_status"] == "Nvt").sum())
+    onbekend    = int((subset["OTIF_status"] == "Onbekend").sum())
+    totaal      = len(subset)
+
+    # OTIF-percentage conform de gespecificeerde formule.
+    otif_pct = (1 - niet_gereed / totaal) * 100 if totaal > 0 else None
+
+    return {
+        "totaal": totaal,
+        "gereed": gereed,
+        "niet_gereed": niet_gereed,
+        "nvt": nvt,
+        "onbekend": onbekend,
+        "otif_pct": otif_pct,
+        "peildatum": peildatum,
+        "date_column": date_column,
+        "date_column_label": label,
+        "orders": subset,
+    }
+
+
+def get_peildatum_from_metadata(meta: dict | None) -> date:
+    """
+    Bepaal de OTIF-peildatum uit de publicatiedatum in metadata. Valt terug
+    op vandaag als de metadata ontbreekt of niet parseerbaar is.
+    """
+    if not meta:
+        return date.today()
+    raw = str(meta.get("published_at", "")).strip()
+    if not raw:
+        return date.today()
+
+    for fmt in (
+        "%d-%m-%Y %H:%M:%S",
+        "%d-%m-%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            return pd.to_datetime(raw, format=fmt).date()
+        except Exception:
+            continue
+
+    # Laatste redmiddel: laat pandas de datum inschatten.
+    try:
+        return pd.to_datetime(raw, dayfirst=True, errors="raise").date()
+    except Exception:
+        return date.today()
