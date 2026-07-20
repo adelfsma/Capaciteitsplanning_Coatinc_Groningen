@@ -28,6 +28,55 @@ from shared import (
 
 st.set_page_config(layout="wide", page_title=get_page_title("Capaciteitsplanning Coatinc Groningen"))
 
+def bereken_aantal_balken(
+    day_df: pd.DataFrame,
+    kg_per_traverse_constructie: float,
+    kg_per_traverse_maatwerk: float,
+    kg_per_traverse_seriewerk: float,
+) -> pd.DataFrame:
+    """Bereken het totale aantal balken per dag op basis van het materiaaltype."""
+    result = day_df.copy()
+
+    def materiaal_kg(materiaaltype: str) -> pd.Series:
+        col = MATERIAALTYPE_DAG_COLS[materiaaltype]
+        if col in result.columns:
+            return pd.to_numeric(result[col], errors="coerce").fillna(0.0)
+        return pd.Series(0.0, index=result.index)
+
+    result["Aantal_balken_berekend"] = (
+        materiaal_kg("Constructie") / kg_per_traverse_constructie
+        + materiaal_kg("Maatwerk") / kg_per_traverse_maatwerk
+        + materiaal_kg("Seriewerk") / kg_per_traverse_seriewerk
+        + materiaal_kg("Overig / onbekend") / kg_per_traverse_maatwerk
+    )
+    return result
+
+
+def voeg_aantal_balken_lijn_toe(ax, x, plot_df: pd.DataFrame):
+    """Voeg de balkenlijn met een eigen schaal aan de rechterzijde toe."""
+    aantal_balken = plot_df["Aantal_balken_berekend"].fillna(0).astype(float).to_numpy()
+    ax_right = ax.twinx()
+    lijn, = ax_right.plot(
+        x,
+        aantal_balken,
+        color="#C00000",
+        marker="o",
+        markersize=4,
+        linewidth=2,
+        label="Aantal balken",
+        zorder=5,
+    )
+    ax_right.set_ylabel("Aantal balken", color="#C00000")
+    ax_right.tick_params(axis="y", colors="#C00000")
+    ax_right.spines["top"].set_visible(False)
+    ax_right.spines["right"].set_alpha(0.45)
+    ax_right.grid(False)
+
+    ymax_right = max(aantal_balken) * 1.15 if len(aantal_balken) else 0
+    ax_right.set_ylim(0, ymax_right if ymax_right > 0 else 1)
+    return lijn
+
+
 def make_professional_matplotlib_chart(day_df: pd.DataFrame):
     plot_df = day_df.copy()
     labels = plot_df["Label_nl"].tolist()
@@ -56,7 +105,7 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
 
     ax.set_title("Capaciteit versus dagbelasting op verzinkdatum", fontsize=15, pad=14)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=0)
+    ax.set_xticklabels(labels, rotation=45, ha="right", rotation_mode="anchor")
     ax.set_ylabel("KG")
     ax.grid(axis="y", alpha=0.25)
     ax.set_axisbelow(True)
@@ -64,7 +113,9 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_alpha(0.3)
     ax.spines["bottom"].set_alpha(0.3)
-    ax.legend(frameon=False, ncols=3, loc="upper left")
+    balken_lijn = voeg_aantal_balken_lijn_toe(ax, x, plot_df)
+    handles, legend_labels = ax.get_legend_handles_labels()
+    ax.legend(handles + [balken_lijn], legend_labels + ["Aantal balken"], frameon=False, ncols=4, loc="upper left")
 
     ymax = max(max(capacity) if capacity else 0, max(load) if load else 0) * 1.15
     if ymax <= 0:
@@ -129,7 +180,7 @@ def make_materiaaltype_matplotlib_chart(day_df: pd.DataFrame):
     load = bottom
     ax.set_title("Tonnage per materiaaltype op verzinkdatum", fontsize=15, pad=14)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=0)
+    ax.set_xticklabels(labels, rotation=45, ha="right", rotation_mode="anchor")
     ax.set_ylabel("KG")
     ax.grid(axis="y", alpha=0.25)
     ax.set_axisbelow(True)
@@ -137,7 +188,9 @@ def make_materiaaltype_matplotlib_chart(day_df: pd.DataFrame):
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_alpha(0.3)
     ax.spines["bottom"].set_alpha(0.3)
-    ax.legend(frameon=False, ncols=5, loc="upper left")
+    balken_lijn = voeg_aantal_balken_lijn_toe(ax, x, plot_df)
+    handles, legend_labels = ax.get_legend_handles_labels()
+    ax.legend(handles + [balken_lijn], legend_labels + ["Aantal balken"], frameon=False, ncols=3, loc="upper left")
 
     ymax = max(max(capacity) if capacity else 0, max(load) if len(load) else 0) * 1.15
     if ymax <= 0:
@@ -468,7 +521,9 @@ st.sidebar.header("Instellingen")
 capaciteit_ton = st.sidebar.slider("Max capaciteit per dag (ton)", 50, 90, 60, 5)
 capaciteit_kg = capaciteit_ton * 1000
 offset = st.sidebar.selectbox("Verzinkdatum = leverdatum - X werkdagen", [1, 2, 3, 4], index=1)
-kg_per_traverse = st.sidebar.number_input("KG per traverse", min_value=100, max_value=10000, value=1000, step=100)
+kg_per_traverse_constructie = st.sidebar.number_input("KG per traverse Constructie", min_value=100, max_value=10000, value=1000, step=100)
+kg_per_traverse_maatwerk = st.sidebar.number_input("KG per traverse Maatwerk", min_value=100, max_value=10000, value=1000, step=100)
+kg_per_traverse_seriewerk = st.sidebar.number_input("KG per traverse Seriewerk", min_value=100, max_value=10000, value=1000, step=100)
 default_start = previous_workday(date.today())
 startdatum = st.sidebar.date_input("Startdatum rapport", value=default_start)
 toon_alle_regels = st.sidebar.checkbox("Toon alle regels in controletab", value=True)
@@ -479,7 +534,20 @@ except Exception as e:
     st.error(f"Kan gepubliceerde data niet laden: {e}")
     st.stop()
 
-df, df_plan, dag, week, advies_datum = build_dashboard_data(df_raw, holiday_df, startdatum, capaciteit_kg, offset, kg_per_traverse)
+df, df_plan, dag, week, advies_datum = build_dashboard_data(
+    df_raw,
+    holiday_df,
+    startdatum,
+    capaciteit_kg,
+    offset,
+    kg_per_traverse_constructie,
+)
+dag = bereken_aantal_balken(
+    dag,
+    kg_per_traverse_constructie,
+    kg_per_traverse_maatwerk,
+    kg_per_traverse_seriewerk,
+)
 
 # ── OTIF-instellingen ────────────────────────────────────────────────────────
 # De peildatum is standaard de dag van de laatste publicatie (het exportmoment
@@ -978,7 +1046,9 @@ with tab4:
     debug_rows = [
         {"Categorie":"Instellingen","Omschrijving":"Startdatum rapport","Waarde":str(startdatum)},
         {"Categorie":"Instellingen","Omschrijving":"Capaciteit per dag (kg)","Waarde":int(capaciteit_kg)},
-        {"Categorie":"Instellingen","Omschrijving":"KG per traverse","Waarde":int(kg_per_traverse)},
+        {"Categorie":"Instellingen","Omschrijving":"KG per traverse Constructie","Waarde":int(kg_per_traverse_constructie)},
+        {"Categorie":"Instellingen","Omschrijving":"KG per traverse Maatwerk","Waarde":int(kg_per_traverse_maatwerk)},
+        {"Categorie":"Instellingen","Omschrijving":"KG per traverse Seriewerk","Waarde":int(kg_per_traverse_seriewerk)},
         {"Categorie":"Bestanden","Omschrijving":"Orderbestand","Waarde":order_file},
         {"Categorie":"Kalender","Omschrijving":"Aantal feestdagen / sluitingen","Waarde":int(len(holiday_df))},
         {"Categorie":"Records","Omschrijving":"Niet verzinkt","Waarde":int((df["Verzinkstatus"] == "Niet verzinkt").sum())},
