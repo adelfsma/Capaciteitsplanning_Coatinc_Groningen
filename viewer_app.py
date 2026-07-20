@@ -56,7 +56,7 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
 
     ax.set_title("Capaciteit versus dagbelasting op verzinkdatum", fontsize=15, pad=14)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=0)
+    ax.set_xticklabels(labels, rotation=45, ha="right", rotation_mode="anchor")
     ax.set_ylabel("KG")
     ax.grid(axis="y", alpha=0.25)
     ax.set_axisbelow(True)
@@ -129,7 +129,7 @@ def make_materiaaltype_matplotlib_chart(day_df: pd.DataFrame):
     load = bottom
     ax.set_title("Tonnage per materiaaltype op verzinkdatum", fontsize=15, pad=14)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=0)
+    ax.set_xticklabels(labels, rotation=45, ha="right", rotation_mode="anchor")
     ax.set_ylabel("KG")
     ax.grid(axis="y", alpha=0.25)
     ax.set_axisbelow(True)
