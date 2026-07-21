@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.2"
+APP_VERSION = "v2.5.3"
 
 
 def get_app_environment() -> str:
@@ -874,9 +874,15 @@ def load_published_data():
 
 # ── Date / calendar helpers ────────────────────────────────────────────────────
 
-def previous_workday(d: date) -> date:
+def previous_workday(d: date, holiday_dates: set | None = None) -> date:
+    """
+    Retourneer de eerstvolgende werkdag vóór `d`. Slaat weekenden altijd over.
+    Als `holiday_dates` wordt meegegeven, worden feestdagen ook overgeslagen.
+    Backwards compatible: zonder feestdagen-set werkt de functie precies zoals
+    voorheen.
+    """
     d = d - timedelta(days=1)
-    while d.weekday() >= 5:
+    while d.weekday() >= 5 or (holiday_dates is not None and d in holiday_dates):
         d = d - timedelta(days=1)
     return d
 
@@ -1201,8 +1207,11 @@ def _empty_otif_result(peildatum, date_column: str, date_column_label: str) -> d
         "onbekend": 0,
         "otif_pct": None,
         "peildatum": peildatum,
+        "peildatum_vorige_werkdag": None,
         "date_column": date_column,
         "date_column_label": date_column_label,
+        "depot_shift_actief": False,
+        "aantal_depot": 0,
         "orders": pd.DataFrame(),
     }
 
@@ -1212,6 +1221,9 @@ def compute_otif(
     peildatum,
     date_column: str = "Leverdatum",
     date_column_label: str | None = None,
+    holiday_dates: set | None = None,
+    depot_column: str = "Aanleveren depot",
+    apply_depot_shift: bool = True,
 ) -> dict:
     """
     Bereken de OTIF-KPI over orders waarvan de te toetsen datum gelijk is aan
@@ -1226,10 +1238,22 @@ def compute_otif(
         * 'Leverdatum'           → conform de 'Datum' uit de weekexports
         * 'Originele_leverdatum' → variant t.o.v. de originele afspraakdatum
 
+    Depot-shift (op verzoek):
+    - Orders met `Aanleveren depot = 1` hebben een deadline van 17:00 op hun
+      leverdatum. Omdat de brondata rond 08:30 wordt geëxporteerd, worden
+      deze orders pas de eerstvolgende werkdag zinvol op OTIF getoetst.
+    - Op peildatum P worden dus meegenomen:
+        (a) orders met `date_column == P` en `Aanleveren depot != 1`, én
+        (b) orders met `date_column == vorige_werkdag(P)` en
+            `Aanleveren depot == 1`.
+    - `holiday_dates` zorgt ervoor dat 'vorige werkdag' feestdagen overslaat.
+    - Zonder depot-kolom of met `apply_depot_shift=False` valt de logica
+      terug op de oorspronkelijke datum-vergelijking.
+
     Formule conform gebruikersspecificatie:
         OTIF = (1 - aantal te laat / totaal aantal orders) * 100 %
 
-    Waar 'totaal' alle orders van de peildatum betreft (inclusief Nvt en
+    Waar 'totaal' alle meetellende orders betreft (inclusief Nvt en
     Onbekend) en 'te laat' het aantal orders met OTIF-status = 'Nee'.
     """
     label = date_column_label or date_column
@@ -1243,20 +1267,48 @@ def compute_otif(
         df = df[df["Bron_week"].astype(str).str.strip().str.lower() != "reservering"].copy()
 
     peil_ts = pd.Timestamp(peildatum).normalize()
-    date_series = pd.to_datetime(df[date_column], errors="coerce")
-    mask = date_series.dt.normalize() == peil_ts
+    date_series = pd.to_datetime(df[date_column], errors="coerce").dt.normalize()
+
+    # Depot-vlag: NaN/leeg = geen depot. Coatinc 24 Amsterdam is elders in
+    # load_published_data al op 1 gezet. Waarde-vergelijking op '== 1' zodat
+    # tekstuele varianten ('1'/'0') na coercion netjes werken.
+    depot_shift_actief = bool(apply_depot_shift) and (depot_column in df.columns)
+    if depot_shift_actief:
+        depot_num = pd.to_numeric(df[depot_column], errors="coerce").fillna(0)
+        is_depot = depot_num == 1
+        vorige_werkdag = previous_workday(peildatum, holiday_dates)
+        vorige_ts = pd.Timestamp(vorige_werkdag).normalize()
+        # Niet-depot orders op peildatum + depot-orders op vorige werkdag.
+        mask = (
+            ((date_series == peil_ts)  & (~is_depot))
+            |
+            ((date_series == vorige_ts) & ( is_depot))
+        )
+    else:
+        is_depot = pd.Series(False, index=df.index)
+        vorige_werkdag = None
+        mask = date_series == peil_ts
 
     subset = df.loc[mask].copy()
     if subset.empty or "Status" not in subset.columns:
-        return _empty_otif_result(peildatum, date_column, label)
+        result = _empty_otif_result(peildatum, date_column, label)
+        result["peildatum_vorige_werkdag"] = vorige_werkdag
+        result["depot_shift_actief"] = depot_shift_actief
+        return result
 
     subset["OTIF_status"] = subset["Status"].apply(map_otif_status)
+    # Boolean voor duidelijkheid in de detailtabel én in de samenvatting.
+    if depot_shift_actief:
+        subset["Is_depot"] = is_depot.loc[subset.index]
+    else:
+        subset["Is_depot"] = False
 
     gereed      = int((subset["OTIF_status"] == "Ja").sum())
     niet_gereed = int((subset["OTIF_status"] == "Nee").sum())
     nvt         = int((subset["OTIF_status"] == "Nvt").sum())
     onbekend    = int((subset["OTIF_status"] == "Onbekend").sum())
     totaal      = len(subset)
+    aantal_depot = int(subset["Is_depot"].sum())
 
     # OTIF-percentage conform de gespecificeerde formule.
     otif_pct = (1 - niet_gereed / totaal) * 100 if totaal > 0 else None
@@ -1269,8 +1321,11 @@ def compute_otif(
         "onbekend": onbekend,
         "otif_pct": otif_pct,
         "peildatum": peildatum,
+        "peildatum_vorige_werkdag": vorige_werkdag,
         "date_column": date_column,
         "date_column_label": label,
+        "depot_shift_actief": depot_shift_actief,
+        "aantal_depot": aantal_depot,
         "orders": subset,
     }
 

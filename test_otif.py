@@ -216,6 +216,156 @@ def test_get_peildatum_from_metadata():
     print("✅ test_get_peildatum_from_metadata")
 
 
+def test_previous_workday_holidays():
+    """previous_workday moet weekenden altijd overslaan; met holiday_dates
+    ook feestdagen."""
+    from shared import previous_workday
+    # Maandag → vrijdag
+    assert previous_workday(date(2026, 7, 20)) == date(2026, 7, 17)
+    # Vrijdag → donderdag
+    assert previous_workday(date(2026, 7, 17)) == date(2026, 7, 16)
+    # Zondag → vrijdag (start van zondag; -1 = zaterdag; -2 = vrijdag)
+    assert previous_workday(date(2026, 7, 19)) == date(2026, 7, 17)
+    # Feestdag overslaan: als vr 17-07 een feestdag is, dan ma → do 16-07
+    hd = {date(2026, 7, 17)}
+    assert previous_workday(date(2026, 7, 20), hd) == date(2026, 7, 16)
+    # Meerdere feestdagen na elkaar
+    hd = {date(2026, 7, 16), date(2026, 7, 17)}
+    assert previous_workday(date(2026, 7, 20), hd) == date(2026, 7, 15)
+    print("✅ test_previous_workday_holidays")
+
+
+def test_compute_otif_depot_shift_basic():
+    """
+    Depot-orders van de vorige werkdag tellen mee op peildatum;
+    depot-orders van de peildatum tellen NIET mee (worden morgen beoordeeld);
+    niet-depot-orders werken zoals voorheen.
+    """
+    peildag  = date(2026, 7, 21)   # dinsdag
+    vorige   = date(2026, 7, 20)   # maandag (vorige werkdag)
+
+    df = pd.DataFrame([
+        # 1) Op peildag, niet-depot → meetellend (Ja)
+        {"Bron_week": "0", "Nummer": "N-1", "Leverdatum": pd.Timestamp(peildag),
+         "Status": "uitgeleverd", "Aanleveren depot": 0},
+        # 2) Op peildag, depot=1 → NIET meetellen (verschoven naar morgen)
+        {"Bron_week": "0", "Nummer": "D-1", "Leverdatum": pd.Timestamp(peildag),
+         "Status": "Productie gereed", "Aanleveren depot": 1},
+        # 3) Op vorige werkdag, depot=1 → wél meetellen (Nee = te laat)
+        {"Bron_week": "0", "Nummer": "D-2", "Leverdatum": pd.Timestamp(vorige),
+         "Status": "Productie gereed", "Aanleveren depot": 1},
+        # 4) Op vorige werkdag, depot=1, gereed (Ja)
+        {"Bron_week": "0", "Nummer": "D-3", "Leverdatum": pd.Timestamp(vorige),
+         "Status": "Afgehaald", "Aanleveren depot": 1},
+        # 5) Op vorige werkdag, niet-depot → NIET meetellen (hoort bij gisteren)
+        {"Bron_week": "0", "Nummer": "N-2", "Leverdatum": pd.Timestamp(vorige),
+         "Status": "uitgeleverd", "Aanleveren depot": 0},
+        # 6) Op peildag, NaN depot-waarde → behandel als depot=0 → meetellen
+        {"Bron_week": "0", "Nummer": "N-3", "Leverdatum": pd.Timestamp(peildag),
+         "Status": "Afgehaald", "Aanleveren depot": None},
+        # 7) Reservering op peildag → nooit meetellen
+        {"Bron_week": "reservering", "Nummer": "R-1", "Leverdatum": pd.Timestamp(peildag),
+         "Status": "Reservering", "Aanleveren depot": 0},
+    ])
+
+    r = compute_otif(df, peildatum=peildag, holiday_dates=set())
+
+    # Meetellend: N-1 (Ja), D-2 (Nee), D-3 (Ja), N-3 (Ja) = 4 orders
+    assert r["totaal"] == 4, f"totaal={r['totaal']}"
+    assert r["gereed"] == 3, f"gereed={r['gereed']}"        # N-1, D-3, N-3
+    assert r["niet_gereed"] == 1, f"niet_gereed={r['niet_gereed']}"  # D-2
+    assert r["aantal_depot"] == 2, f"aantal_depot={r['aantal_depot']}"  # D-2, D-3
+    assert r["depot_shift_actief"] is True
+    assert r["peildatum_vorige_werkdag"] == vorige
+    # OTIF = (1 - 1/4) * 100 = 75%
+    assert abs(r["otif_pct"] - 75.0) < 1e-6
+    # D-1 (depot op peildag) NIET in subset
+    assert "D-1" not in set(r["orders"]["Nummer"].astype(str))
+    # N-2 (niet-depot op vorige werkdag) NIET in subset
+    assert "N-2" not in set(r["orders"]["Nummer"].astype(str))
+    print("✅ test_compute_otif_depot_shift_basic")
+
+
+def test_compute_otif_depot_shift_over_weekend():
+    """Op maandag moeten depot-orders van vrijdag meegeteld worden."""
+    maandag = date(2026, 7, 20)
+    vrijdag = date(2026, 7, 17)
+
+    df = pd.DataFrame([
+        {"Bron_week": "0", "Nummer": "MA-1", "Leverdatum": pd.Timestamp(maandag),
+         "Status": "uitgeleverd", "Aanleveren depot": 0},
+        {"Bron_week": "0", "Nummer": "DEP-VR", "Leverdatum": pd.Timestamp(vrijdag),
+         "Status": "Productie gereed", "Aanleveren depot": 1},
+        {"Bron_week": "0", "Nummer": "GEEN-VR", "Leverdatum": pd.Timestamp(vrijdag),
+         "Status": "uitgeleverd", "Aanleveren depot": 0},
+    ])
+
+    r = compute_otif(df, peildatum=maandag, holiday_dates=set())
+    assert r["peildatum_vorige_werkdag"] == vrijdag
+    # MA-1 (Ja) + DEP-VR (Nee) = 2 meetellend
+    assert r["totaal"] == 2
+    assert r["gereed"] == 1
+    assert r["niet_gereed"] == 1
+    assert r["aantal_depot"] == 1
+    # GEEN-VR (niet-depot vrijdag) NIET meegeteld
+    assert "GEEN-VR" not in set(r["orders"]["Nummer"].astype(str))
+    print("✅ test_compute_otif_depot_shift_over_weekend")
+
+
+def test_compute_otif_depot_shift_over_holiday():
+    """Feestdag tussen peildatum en vorige werkdag wordt overgeslagen."""
+    donderdag = date(2026, 5, 14)
+    vrijdag   = date(2026, 5, 15)   # feestdag
+    maandag   = date(2026, 5, 18)
+
+    df = pd.DataFrame([
+        {"Bron_week": "0", "Nummer": "DEP-DO", "Leverdatum": pd.Timestamp(donderdag),
+         "Status": "Afgehaald", "Aanleveren depot": 1},
+    ])
+
+    r = compute_otif(df, peildatum=maandag, holiday_dates={vrijdag})
+    assert r["peildatum_vorige_werkdag"] == donderdag, (
+        f"verwacht do {donderdag}, kreeg {r['peildatum_vorige_werkdag']}"
+    )
+    assert r["totaal"] == 1
+    assert r["aantal_depot"] == 1
+    print("✅ test_compute_otif_depot_shift_over_holiday")
+
+
+def test_compute_otif_depot_shift_fallback_no_column():
+    """Zonder 'Aanleveren depot' kolom → oude gedrag: iedereen op peildatum."""
+    peildag = date(2026, 7, 21)
+    df = pd.DataFrame([
+        {"Bron_week": "0", "Nummer": "X-1", "Leverdatum": pd.Timestamp(peildag),
+         "Status": "uitgeleverd"},
+        {"Bron_week": "0", "Nummer": "X-2", "Leverdatum": pd.Timestamp(peildag),
+         "Status": "Productie gereed"},
+    ])
+    r = compute_otif(df, peildatum=peildag, holiday_dates=set())
+    assert r["depot_shift_actief"] is False
+    assert r["totaal"] == 2
+    assert r["aantal_depot"] == 0
+    print("✅ test_compute_otif_depot_shift_fallback_no_column")
+
+
+def test_compute_otif_depot_shift_disable_flag():
+    """apply_depot_shift=False deactiveert de logica expliciet."""
+    peildag = date(2026, 7, 21)
+    vorige  = date(2026, 7, 20)
+    df = pd.DataFrame([
+        {"Bron_week": "0", "Nummer": "A", "Leverdatum": pd.Timestamp(peildag),
+         "Status": "uitgeleverd", "Aanleveren depot": 1},
+        {"Bron_week": "0", "Nummer": "B", "Leverdatum": pd.Timestamp(vorige),
+         "Status": "Productie gereed", "Aanleveren depot": 1},
+    ])
+    r = compute_otif(df, peildatum=peildag, holiday_dates=set(), apply_depot_shift=False)
+    # Zonder shift: alleen A (op peildag) telt mee
+    assert r["totaal"] == 1
+    assert set(r["orders"]["Nummer"].astype(str)) == {"A"}
+    assert r["depot_shift_actief"] is False
+    print("✅ test_compute_otif_depot_shift_disable_flag")
+
+
 def test_otif_status_map_content():
     """Verifieer dat OTIF_STATUS_MAP alle statussen uit de bijlage bevat."""
     verwacht_sleutels = {
@@ -281,4 +431,10 @@ if __name__ == "__main__":
     test_compute_otif_empty_and_no_column()
     test_compute_otif_perfect_score()
     test_get_peildatum_from_metadata()
+    test_previous_workday_holidays()
+    test_compute_otif_depot_shift_basic()
+    test_compute_otif_depot_shift_over_weekend()
+    test_compute_otif_depot_shift_over_holiday()
+    test_compute_otif_depot_shift_fallback_no_column()
+    test_compute_otif_depot_shift_disable_flag()
     print("\nAlle tests geslaagd 🎉")

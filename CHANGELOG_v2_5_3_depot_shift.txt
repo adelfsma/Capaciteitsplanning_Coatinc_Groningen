@@ -1,0 +1,75 @@
+v2.5.3 OTIF depot-shift (aanleveren depot = 1 → volgende werkdag meten)
+
+Gecombineerde grafiekversie:
+- De laatste grafiekaanpassingen zijn samengevoegd met de depot-shift.
+- Datumlabels op beide x-assen staan 45 graden gedraaid.
+- Drie afzonderlijke instellingen: KG per traverse Constructie, Maatwerk en
+  Seriewerk. Standaardwaarden: respectievelijk 1100, 850 en 900 KG.
+- Beide grafieken tonen een rode lijn voor het berekende aantal balken op de
+  secundaire y-as, inclusief een waarde-label met één decimaal per datum.
+- Overig / onbekend gebruikt voor de berekening de traversewaarde van Maatwerk.
+
+Aanleiding: orders met "Aanleveren depot" = 1 in OrderExport2G.xlsx hebben
+een deadline van 17:00 op hun leverdatum. De brondata wordt echter rond
+08:30 uit het systeem gehaald, dus deze depot-orders kunnen op de dag
+zelf nog niet zinvol op OTIF getoetst worden.
+
+Nieuwe regel:
+- Op peildatum P worden meegeteld:
+    (a) orders met leverdatum == P én Aanleveren depot != 1
+    (b) orders met leverdatum == vorige_werkdag(P) én Aanleveren depot == 1
+- 'Vorige werkdag' slaat weekenden én feestdagen over (via de bestaande
+  holidays-set uit de metadata-kalender).
+- Zonder 'Aanleveren depot'-kolom of met apply_depot_shift=False valt de
+  logica terug op het oorspronkelijke gedrag (backwards compatible).
+
+shared.py
+- APP_VERSION → v2.5.3
+- previous_workday(d, holiday_dates=None) — signatuur uitgebreid met een
+  optionele feestdagen-set. Backwards compatible: aanroepen zonder
+  feestdagen werken exact zoals voorheen.
+- compute_otif() — nieuwe parameters:
+    * holiday_dates: set | None
+    * depot_column: str = "Aanleveren depot"
+    * apply_depot_shift: bool = True
+  Nieuwe velden in het resultaat-dict:
+    * peildatum_vorige_werkdag
+    * depot_shift_actief
+    * aantal_depot (aantal meegetelde depot-orders van de vorige werkdag)
+  Nieuwe kolom in de orders-subset:
+    * Is_depot (bool, True voor rijen met Aanleveren depot == 1)
+- Depot-detectie tolerant: NaN of niet-numerieke waarden → depot=0.
+  Coatinc 24 Amsterdam is elders al op 1 gezet, dat blijft ongewijzigd.
+
+viewer_app.py
+- Feestdagen uit holiday_df worden doorgegeven aan compute_otif.
+- OTIF-samenvatting onder de dashboardkaart toont, als er depot-orders
+  zijn meegeteld: "waarvan N depot-order(s) van dd-mm-jjjj".
+- OTIF-tabblad caption legt de depot-shift-regel uit met de vorige-
+  werkdag-datum en het aantal meegetelde depot-orders.
+- Detailtabel "Gebruikte gegevens (OTIF)" toont nu ook de kolommen
+  "Aanleveren depot" en "Is_depot" naast de datum-kolommen, zodat de
+  verschoven regels direct herkenbaar zijn.
+- Excel-download bevat automatisch dezelfde extra kolommen.
+
+Tests (test_otif.py)
+- test_previous_workday_holidays — weekend + feestdagen overslaan
+- test_compute_otif_depot_shift_basic — kernscenario met 7 rijen
+- test_compute_otif_depot_shift_over_weekend — maandag beoordeelt vrijdag
+- test_compute_otif_depot_shift_over_holiday — feestdag tussenin
+- test_compute_otif_depot_shift_fallback_no_column — backwards compat
+- test_compute_otif_depot_shift_disable_flag — uit-knop werkt
+
+15 tests slagen, waarvan 5 nieuw voor de depot-shift.
+
+Geen wijzigingen in:
+- shared.py verzinkdatum-logica, load_published_data, build_dashboard_data
+- OTIF-tabblad gauge en formule-uitleg
+- manager_app.py (byte-voor-byte identiek)
+- upload/publicatie-flow of vereiste bestanden
+
+Realistisch effect op OTIF-uitkomst:
+- Voorbeeld: 50 orders van vandaag (10 nee, 7 daarvan depot) + 15 depot
+  van gisteren (3 nee).
+- Zonder shift: OTIF = (1 − 17/50) × 100 = 66,00 %
+- Met shift:    OTIF = (1 − 13/58) × 100 = 77,59 %

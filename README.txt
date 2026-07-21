@@ -1,3 +1,33 @@
+Capaciteitsplanning Coatinc Groningen v2.5.3
+
+Gecombineerde grafiekversie:
+- Schuine datumlabels op beide dashboardgrafieken.
+- Aparte KG-per-traverse-instellingen voor Constructie (standaard 1100),
+  Maatwerk (standaard 850) en Seriewerk (standaard 900).
+- Rode lijn met het berekende aantal balken op de rechter y-as, inclusief
+  waarde-labels per datum. Overig / onbekend gebruikt de Maatwerk-instelling.
+
+OTIF depot-shift:
+- Orders met "Aanleveren depot" = 1 (uit OrderExport2G.xlsx) hebben een
+  deadline van 17:00 op hun leverdatum. Omdat de brondata rond 08:30
+  wordt geëxporteerd, worden deze orders pas de eerstvolgende werkdag
+  op OTIF getoetst.
+- Op peildatum P worden meegeteld:
+    (a) niet-depot orders met leverdatum == P
+    (b) depot-orders met leverdatum == vorige werkdag (P)
+- 'Vorige werkdag' slaat weekenden én feestdagen over.
+- Backwards compatible: zonder de kolom "Aanleveren depot" of met de
+  vlag apply_depot_shift=False valt de logica terug op het oude gedrag.
+
+In de UI:
+- Onder de OTIF-dashboardkaart komt een regel "waarvan N depot-order(s)
+  van dd-mm-jjjj" als er depot-orders zijn meegeteld.
+- Het OTIF-tabblad noemt de vorige-werkdag-datum en het aantal depot-
+  orders in de caption boven de detailtabel.
+- De detailtabel toont extra kolommen "Aanleveren depot" en "Is_depot"
+  zodat de verschoven regels direct herkenbaar zijn.
+
+
 Capaciteitsplanning Coatinc Groningen v2.5.2
 
 Verbeteringen (compact + verfijnd):

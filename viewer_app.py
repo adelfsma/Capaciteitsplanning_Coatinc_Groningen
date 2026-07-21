@@ -53,7 +53,7 @@ def bereken_aantal_balken(
 
 
 def voeg_aantal_balken_lijn_toe(ax, x, plot_df: pd.DataFrame):
-    """Voeg de balkenlijn met een eigen schaal aan de rechterzijde toe."""
+    """Voeg de balkenlijn met waarde-labels en een rechter y-as toe."""
     aantal_balken = plot_df["Aantal_balken_berekend"].fillna(0).astype(float).to_numpy()
     ax_right = ax.twinx()
     lijn, = ax_right.plot(
@@ -72,8 +72,25 @@ def voeg_aantal_balken_lijn_toe(ax, x, plot_df: pd.DataFrame):
     ax_right.spines["right"].set_alpha(0.45)
     ax_right.grid(False)
 
-    ymax_right = max(aantal_balken) * 1.15 if len(aantal_balken) else 0
-    ax_right.set_ylim(0, ymax_right if ymax_right > 0 else 1)
+    ymax_right = max(aantal_balken) * 1.25 if len(aantal_balken) else 0
+    ymax_right = ymax_right if ymax_right > 0 else 1
+    ax_right.set_ylim(0, ymax_right)
+
+    for i, value in enumerate(aantal_balken):
+        if value > 0:
+            label = f"{value:.1f}".replace(".", ",")
+            ax_right.text(
+                i,
+                value + ymax_right * 0.018,
+                label,
+                ha="center",
+                va="bottom",
+                fontsize=7,
+                fontweight="bold",
+                color="#C00000",
+                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 0.5},
+                zorder=6,
+            )
     return lijn
 
 
@@ -521,9 +538,9 @@ st.sidebar.header("Instellingen")
 capaciteit_ton = st.sidebar.slider("Max capaciteit per dag (ton)", 50, 90, 60, 5)
 capaciteit_kg = capaciteit_ton * 1000
 offset = st.sidebar.selectbox("Verzinkdatum = leverdatum - X werkdagen", [1, 2, 3, 4], index=1)
-kg_per_traverse_constructie = st.sidebar.number_input("KG per traverse Constructie", min_value=100, max_value=10000, value=1000, step=100)
-kg_per_traverse_maatwerk = st.sidebar.number_input("KG per traverse Maatwerk", min_value=100, max_value=10000, value=1000, step=100)
-kg_per_traverse_seriewerk = st.sidebar.number_input("KG per traverse Seriewerk", min_value=100, max_value=10000, value=1000, step=100)
+kg_per_traverse_constructie = st.sidebar.number_input("KG per traverse Constructie", min_value=100, max_value=10000, value=1100, step=50)
+kg_per_traverse_maatwerk = st.sidebar.number_input("KG per traverse Maatwerk", min_value=100, max_value=10000, value=850, step=50)
+kg_per_traverse_seriewerk = st.sidebar.number_input("KG per traverse Seriewerk", min_value=100, max_value=10000, value=900, step=50)
 default_start = previous_workday(date.today())
 startdatum = st.sidebar.date_input("Startdatum rapport", value=default_start)
 toon_alle_regels = st.sidebar.checkbox("Toon alle regels in controletab", value=True)
@@ -599,11 +616,16 @@ else:
 
 otif_date_column, otif_date_label = otif_datum_keuzes[otif_datum_keuze_label]
 
+# Feestdagen doorgeven zodat 'vorige werkdag' (voor de depot-shift) feestdagen
+# overslaat. holiday_df bevat de datums uit de metadata-feestdagenkalender.
+otif_holiday_dates = set(holiday_df["Datum"].tolist()) if not holiday_df.empty else set()
+
 otif_result = compute_otif(
     df,
     peildatum=otif_peildatum,
     date_column=otif_date_column,
     date_column_label=otif_date_label,
+    holiday_dates=otif_holiday_dates,
 )
 
 tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Gebruikte gegevens", "OTIF", "Debug"])
@@ -728,6 +750,19 @@ with tab1:
             if otif_result["onbekend"] > 0:
                 samenvatting += f" · {otif_result['onbekend']} onbekend"
             samenvatting += f" (totaal {otif_result['totaal']})"
+            # Depot-shift: als er depot-orders van de vorige werkdag zijn
+            # meegeteld, laten we dat expliciet zien zodat de gebruiker snapt
+            # waarom er regels met een oudere Leverdatum in de detailtabel
+            # staan.
+            if otif_result.get("depot_shift_actief") and otif_result.get("aantal_depot", 0) > 0:
+                vw = otif_result.get("peildatum_vorige_werkdag")
+                vw_str = pd.Timestamp(vw).strftime("%d-%m-%Y") if vw is not None else ""
+                samenvatting += (
+                    f"<br><span style='font-size:0.78rem; color:#94a3b8;'>"
+                    f"waarvan {otif_result['aantal_depot']} depot-order"
+                    f"{'s' if otif_result['aantal_depot'] != 1 else ''} van {vw_str}"
+                    f"</span>"
+                )
         else:
             samenvatting = "Geen orders met deze peildatum in de dataset."
 
@@ -899,10 +934,20 @@ with tab3:
     st.subheader("OTIF – On Time In Full")
 
     peildatum_str = pd.Timestamp(otif_result["peildatum"]).strftime("%d-%m-%Y")
-    st.caption(
+    _caption_regels = [
         f"Peildatum: **{peildatum_str}** · vergeleken met **{otif_result['date_column_label']}** · "
         f"reserveringen worden niet meegeteld."
-    )
+    ]
+    if otif_result.get("depot_shift_actief"):
+        vw = otif_result.get("peildatum_vorige_werkdag")
+        vw_str = pd.Timestamp(vw).strftime("%d-%m-%Y") if vw is not None else ""
+        _caption_regels.append(
+            f"Depot-orders (`Aanleveren depot = 1`) hebben een deadline van "
+            f"17:00 op hun leverdatum en worden pas de eerstvolgende werkdag "
+            f"gemeten. Op deze peildatum tellen depot-orders met leverdatum "
+            f"**{vw_str}** mee ({otif_result.get('aantal_depot', 0)} stuks)."
+        )
+    st.caption(" ".join(_caption_regels))
 
     # Kerngetallen boven de tabel.
     kpi_col1, kpi_col2, kpi_col3, kpi_col4, kpi_col5 = st.columns(5)
@@ -956,11 +1001,15 @@ Groen op de meter vanaf **{OTIF_GAUGE_GREEN_THRESHOLD:.0f}%**, oranje vanaf **{O
         )
     else:
         # Kolomkeuze: aansluiten bij 'Gebruikte gegevens' voor herkenbaarheid.
+        # Is_depot (van compute_otif) wordt naast Aanleveren depot getoond
+        # zodat direct duidelijk is welke regels een verschoven peildatum
+        # hebben.
         otif_cols = [
             "Bronbestand", "Bron_week", "Nummer", "Ordernummer_base",
             "Debiteurnummer", "Klantnaam",
             "Segment_debtor_export", "Materiaaltype",
             "Datum", "Leverdatum", "Originele_leverdatum",
+            "Aanleveren depot", "Is_depot",
             "Status", "OTIF_status", "Verzinkstatus",
             "Gewicht_effectief_kg", "Gewicht_bron",
         ]
