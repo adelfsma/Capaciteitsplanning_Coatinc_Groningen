@@ -2,6 +2,7 @@
 import os
 from datetime import date
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -124,6 +125,9 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=45, ha="right", rotation_mode="anchor")
     ax.set_ylabel("KG")
+    ax.yaxis.set_major_formatter(
+    FuncFormatter(lambda value, position: format_int(value))
+    )
     ax.grid(axis="y", alpha=0.25)
     ax.set_axisbelow(True)
     ax.spines["top"].set_visible(False)
@@ -199,6 +203,9 @@ def make_materiaaltype_matplotlib_chart(day_df: pd.DataFrame):
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=45, ha="right", rotation_mode="anchor")
     ax.set_ylabel("KG")
+    ax.yaxis.set_major_formatter(
+    FuncFormatter(lambda value, position: format_int(value))
+    )
     ax.grid(axis="y", alpha=0.25)
     ax.set_axisbelow(True)
     ax.spines["top"].set_visible(False)
@@ -750,19 +757,7 @@ with tab1:
             if otif_result["onbekend"] > 0:
                 samenvatting += f" · {otif_result['onbekend']} onbekend"
             samenvatting += f" (totaal {otif_result['totaal']})"
-            # Depot-shift: als er depot-orders van de vorige werkdag zijn
-            # meegeteld, laten we dat expliciet zien zodat de gebruiker snapt
-            # waarom er regels met een oudere Leverdatum in de detailtabel
-            # staan.
-            if otif_result.get("depot_shift_actief") and otif_result.get("aantal_depot", 0) > 0:
-                vw = otif_result.get("peildatum_vorige_werkdag")
-                vw_str = pd.Timestamp(vw).strftime("%d-%m-%Y") if vw is not None else ""
-                samenvatting += (
-                    f"<br><span style='font-size:0.78rem; color:#94a3b8;'>"
-                    f"waarvan {otif_result['aantal_depot']} depot-order"
-                    f"{'s' if otif_result['aantal_depot'] != 1 else ''} van {vw_str}"
-                    f"</span>"
-                )
+            
         else:
             samenvatting = "Geen orders met deze peildatum in de dataset."
 
