@@ -21,22 +21,26 @@ from shared import (
     render_environment_banner,
     get_page_title,
     is_test_environment,
+    get_locatie_naam,
+    get_locatie_logo,
+    get_beheer_wachtwoord,
 )
 from pathlib import Path
 import tempfile
 
-st.set_page_config(layout="wide", page_title=get_page_title("Capaciteitsplanning Coatinc Groningen - Beheer"))
+st.set_page_config(layout="wide", page_title=get_page_title(f"Capaciteitsplanning {get_locatie_naam()} - Beheer"))
 
-if os.path.exists("logo_coatinc_groningen.png"):
-    st.sidebar.image("logo_coatinc_groningen.png", use_container_width=True)
+_logo = get_locatie_logo()
+if os.path.exists(_logo):
+    st.sidebar.image(_logo, use_container_width=True)
 st.sidebar.caption(APP_VERSION)
 render_environment_banner("Beheer")
 
 password = st.sidebar.text_input("Wachtwoord", type="password")
-if password != "coatinc2026":
+if password != get_beheer_wachtwoord():
     st.stop()
 
-st.title("Capaciteitsplanning Coatinc Groningen – Beheer")
+st.title(f"Capaciteitsplanning {get_locatie_naam()} – Beheer")
 st.caption("Upload per bestand en publiceer daarna de volledige dataset voor alle kijkers.")
 if is_test_environment():
     st.warning("Let op: dit is de TEST-beheeromgeving. Controleer de bucket/secrets en publiceer alleen bewust bestanden. Als Test dezelfde bucket gebruikt als Main, schrijf je naar dezelfde dataopslag.")

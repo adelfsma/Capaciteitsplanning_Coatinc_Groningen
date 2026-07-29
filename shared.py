@@ -203,7 +203,55 @@ MATERIAALTYPE_DAG_COLS = {
 # binnen het planningsvenster en voor de juiste locatie.
 RESERVERING_WINDOW_VOOR = 2    # dagen vóór vandaag
 RESERVERING_WINDOW_NA   = 40   # dagen na vandaag
-RESERVERING_LOCATIE     = "Coatinc Groningen"
+
+
+# ── Vestiging-specifieke configuratie ──────────────────────────────────────────
+# Alles wat per vestiging verschilt komt uit secrets.toml → [locatie].
+# Zo bedient één codebase meerdere vestigingen. Ontbreekt de sectie of een veld,
+# dan valt de waarde terug op de Groningse standaard (backwards compatible).
+#
+# [locatie]
+# naam                = "Coatinc Groningen"           # titels
+# logo                = "logo_coatinc_groningen.png"  # bestand in repo-root
+# reservering_locatie = "Coatinc Groningen"           # exacte match op 'Locatie V'
+# beheer_wachtwoord   = "coatinc2026"                 # wachtwoord beheeromgeving
+
+_LOCATIE_DEFAULTS = {
+    "naam": "Coatinc Groningen",
+    "logo": "logo_coatinc_groningen.png",
+    "beheer_wachtwoord": "coatinc2026",
+}
+
+
+def _get_locatie_setting(key: str, default: str) -> str:
+    try:
+        cfg = st.secrets["locatie"]
+        value = cfg.get(key, "") if hasattr(cfg, "get") else ""
+    except (KeyError, FileNotFoundError):
+        value = ""
+    value = str(value).strip()
+    return value if value else default
+
+
+def get_locatie_naam() -> str:
+    """Weergavenaam van de vestiging (gebruikt in de paginatitels)."""
+    return _get_locatie_setting("naam", _LOCATIE_DEFAULTS["naam"])
+
+
+def get_locatie_logo() -> str:
+    """Bestandsnaam van het logo in de repo-root."""
+    return _get_locatie_setting("logo", _LOCATIE_DEFAULTS["logo"])
+
+
+def get_beheer_wachtwoord() -> str:
+    """Wachtwoord voor de beheeromgeving."""
+    return _get_locatie_setting("beheer_wachtwoord", _LOCATIE_DEFAULTS["beheer_wachtwoord"])
+
+
+def get_reservering_locatie() -> str:
+    """Waarde waarop 'Locatie V' exact moet matchen voor reserveringen.
+    Valt terug op de vestigingsnaam als niet apart gezet."""
+    return _get_locatie_setting("reservering_locatie", get_locatie_naam())
 
 _TEMP_DIR = Path(tempfile.gettempdir()) / "cap_planning_cache"
 
@@ -513,10 +561,11 @@ def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataF
     """
     Identificeer reserveringen: orders in OrderExport2G die nog NIET in de
     CGS-exports staan, binnen het planningsvenster en uitsluitend voor
-    Locatie V = RESERVERING_LOCATIE ("Coatinc Groningen").
+    Locatie V = get_reservering_locatie() (per vestiging via secrets).
 
     Aangepaste reserveringslogica:
-      - Alleen meenemen als Locatie V exact "Coatinc Groningen" is na trimmen.
+      - Alleen meenemen als Locatie V exact gelijk is aan de ingestelde
+        vestigingswaarde (get_reservering_locatie()) na trimmen.
         Lege Locatie V of ontbrekende Locatie V wordt niet meegenomen.
       - Verzinkdatum reservering:
           1. Als Leverdatum V is gevuld: Leverdatum V - 2 werkdagen.
@@ -558,7 +607,7 @@ def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataF
     if not locatie_col:
         return pd.DataFrame()
 
-    locatie_match = order[locatie_col].astype(str).str.strip().eq(RESERVERING_LOCATIE)
+    locatie_match = order[locatie_col].astype(str).str.strip().eq(get_reservering_locatie())
 
     # Basisfilter: niet in CGS-exports + binnen tijdvenster + juiste locatie.
     # Het tijdvenster blijft gebaseerd op Datum verzending, conform bronexport.

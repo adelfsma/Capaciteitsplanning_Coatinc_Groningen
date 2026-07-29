@@ -25,9 +25,11 @@ from shared import (
     render_environment_banner,
     get_page_title,
     is_test_environment,
+    get_locatie_naam,
+    get_locatie_logo,
 )
 
-st.set_page_config(layout="wide", page_title=get_page_title("Capaciteitsplanning Coatinc Groningen"))
+st.set_page_config(layout="wide", page_title=get_page_title(f"Capaciteitsplanning {get_locatie_naam()}"))
 
 def bereken_aantal_balken(
     day_df: pd.DataFrame,
@@ -523,8 +525,9 @@ def make_otif_gauge_svg(
     return "".join(svg_parts)
 
 
-if os.path.exists("logo_coatinc_groningen.png"):
-    st.sidebar.image("logo_coatinc_groningen.png", width=200)
+_logo = get_locatie_logo()
+if os.path.exists(_logo):
+    st.sidebar.image(_logo, width=200)
 st.sidebar.caption(APP_VERSION)
 render_environment_banner("Viewer")
 
@@ -540,7 +543,7 @@ if meta:
     if notes:
         st.sidebar.write(f"Toelichting: {notes}")
 
-st.title("Capaciteitsplanning Coatinc Groningen")
+st.title(f"Capaciteitsplanning {get_locatie_naam()}")
 st.sidebar.header("Instellingen")
 capaciteit_ton = st.sidebar.slider("Max capaciteit per dag (ton)", 50, 90, 60, 5)
 capaciteit_kg = capaciteit_ton * 1000
