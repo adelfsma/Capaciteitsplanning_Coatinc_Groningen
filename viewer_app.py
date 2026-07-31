@@ -27,6 +27,7 @@ from shared import (
     is_test_environment,
     get_locatie_naam,
     get_locatie_logo,
+    get_poetsen_otif_actief,
 )
 
 st.set_page_config(layout="wide", page_title=get_page_title(f"Capaciteitsplanning {get_locatie_naam()}"))
@@ -636,6 +637,7 @@ otif_result = compute_otif(
     date_column=otif_date_column,
     date_column_label=otif_date_label,
     holiday_dates=otif_holiday_dates,
+    poetsen_afgehaald_niet_ok=get_poetsen_otif_actief(),
 )
 
 tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Gebruikte gegevens", "OTIF", "Debug"])
