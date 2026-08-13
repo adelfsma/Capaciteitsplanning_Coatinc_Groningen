@@ -57,7 +57,16 @@ def bereken_aantal_balken(
 
 
 def voeg_aantal_balken_lijn_toe(ax, x, plot_df: pd.DataFrame):
-    """Voeg de balkenlijn met waarde-labels en een rechter y-as toe."""
+    """Voeg de balkenlijn met waarde-labels en een rechter y-as toe.
+
+    Om te voorkomen dat de rode balken-labels over de kg-totalen van de
+    staafgrafiek heen vallen, wordt de secundaire y-as bewust ruim geschaald:
+    de hoogste rode waarde komt op ~40 % van de zichtbare plot-hoogte te
+    liggen, waardoor lijn en labels altijd in de onderste helft blijven en de
+    kg-totalen boven de balken vrij zicht houden. Elk label krijgt bovendien
+    een subtiel wit-met-rode-rand kadertje zodat 't ook in drukke gebieden
+    leesbaar blijft.
+    """
     aantal_balken = plot_df["Aantal_balken_berekend"].fillna(0).astype(float).to_numpy()
     ax_right = ax.twinx()
     lijn, = ax_right.plot(
@@ -76,23 +85,37 @@ def voeg_aantal_balken_lijn_toe(ax, x, plot_df: pd.DataFrame):
     ax_right.spines["right"].set_alpha(0.45)
     ax_right.grid(False)
 
-    ymax_right = max(aantal_balken) * 1.25 if len(aantal_balken) else 0
-    ymax_right = ymax_right if ymax_right > 0 else 1
+    # Schaal secundaire as zo dat de hoogste balken-waarde op ~30 % van de
+    # plot-hoogte zit; dat garandeert vertical scheiding tussen de balken-
+    # labels en de kg-totalen bovenaan de staven, en ook met de segment-
+    # labels binnen de staven.
+    max_val = float(max(aantal_balken)) if len(aantal_balken) else 0.0
+    if max_val > 0:
+        ymax_right = max_val / 0.30
+    else:
+        ymax_right = 1.0
     ax_right.set_ylim(0, ymax_right)
 
     for i, value in enumerate(aantal_balken):
         if value > 0:
             label = f"{value:.1f}".replace(".", ",")
-            ax_right.text(
-                i,
-                value + ymax_right * 0.018,
+            ax_right.annotate(
                 label,
+                xy=(i, value),
+                xytext=(0, 7),
+                textcoords="offset points",
                 ha="center",
                 va="bottom",
                 fontsize=7,
                 fontweight="bold",
                 color="#C00000",
-                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 0.5},
+                bbox={
+                    "boxstyle": "round,pad=0.2",
+                    "facecolor": "white",
+                    "edgecolor": "#C00000",
+                    "linewidth": 0.6,
+                    "alpha": 0.95,
+                },
                 zorder=6,
             )
     return lijn
@@ -124,7 +147,6 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
     bars_def = ax.bar(x, definitief, width=0.36, color=BLAUW, label="Bevestigde orders", zorder=3)
     bars_res = ax.bar(x, reservering, width=0.36, bottom=definitief, color=ORANJE, label="Reserveringen", zorder=3)
 
-    ax.set_title("Capaciteit versus dagbelasting op verzinkdatum", fontsize=15, pad=14)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=45, ha="right", rotation_mode="anchor")
     ax.set_ylabel("KG")
@@ -139,7 +161,17 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
     ax.spines["bottom"].set_alpha(0.3)
     balken_lijn = voeg_aantal_balken_lijn_toe(ax, x, plot_df)
     handles, legend_labels = ax.get_legend_handles_labels()
-    ax.legend(handles + [balken_lijn], legend_labels + ["Aantal balken"], frameon=False, ncols=4, loc="upper left")
+    # Legenda boven de plot, tussen titel en grafiek. Voorkomt overlap
+    # met balken; ncols laat 'm horizontaal uitspreiden.
+    ax.legend(
+        handles + [balken_lijn],
+        legend_labels + ["Aantal balken"],
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncols=len(handles) + 1,
+        frameon=False,
+        fontsize=9,
+    )
 
     ymax = max(max(capacity) if capacity else 0, max(load) if load else 0) * 1.15
     if ymax <= 0:
@@ -157,7 +189,8 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
             ax.text(i, d / 2, format_int(d), ha="center", va="center", fontsize=7, color="white")
         if r > ymax * 0.06:
             ax.text(i, d + r / 2, format_int(r), ha="center", va="center", fontsize=7, color="white")
-    fig.tight_layout()
+    # Extra top-marge zodat de legenda tussen titel en plot past.
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
     return fig
 
 
@@ -202,7 +235,6 @@ def make_materiaaltype_matplotlib_chart(day_df: pd.DataFrame):
         bottom = bottom + values
 
     load = bottom
-    ax.set_title("Tonnage per materiaaltype op verzinkdatum", fontsize=15, pad=14)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=45, ha="right", rotation_mode="anchor")
     ax.set_ylabel("KG")
@@ -217,7 +249,17 @@ def make_materiaaltype_matplotlib_chart(day_df: pd.DataFrame):
     ax.spines["bottom"].set_alpha(0.3)
     balken_lijn = voeg_aantal_balken_lijn_toe(ax, x, plot_df)
     handles, legend_labels = ax.get_legend_handles_labels()
-    ax.legend(handles + [balken_lijn], legend_labels + ["Aantal balken"], frameon=False, ncols=3, loc="upper left")
+    # Legenda boven de plot, tussen titel en grafiek. Voorkomt overlap met
+    # gestapelde balken; ncols=aantal items zodat 't in één rij past.
+    ax.legend(
+        handles + [balken_lijn],
+        legend_labels + ["Aantal balken"],
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncols=len(handles) + 1,
+        frameon=False,
+        fontsize=9,
+    )
 
     ymax = max(max(capacity) if capacity else 0, max(load) if len(load) else 0) * 1.15
     if ymax <= 0:
@@ -244,7 +286,8 @@ def make_materiaaltype_matplotlib_chart(day_df: pd.DataFrame):
                 )
         bottom_for_label = bottom_for_label + values
 
-    fig.tight_layout()
+    # Extra top-marge zodat de legenda tussen titel en plot past.
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
     return fig
 
 
@@ -782,6 +825,8 @@ with tab1:
 
     st.subheader("Eerstvolgende leverdatum")
     st.markdown(f'<div style="padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid #d0d7de; background-color: #f6f8fa; margin-bottom: 0.75rem;"><div style="font-size: 2.2rem; font-weight: 700;">{advies_datum.strftime("%d-%m-%Y")}</div></div>', unsafe_allow_html=True)
+
+    st.subheader("Capaciteit versus dagbelasting op verzinkdatum")
     st.pyplot(make_professional_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
     st.caption("De grafiek toont de geplande belasting per verzinkdatum, uitgesplitst naar bevestigde orders en reserveringen. De verzinkdatum is berekend als de leverdatum minus het ingestelde aantal werkdagen.")
 

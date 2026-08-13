@@ -1,3 +1,17 @@
+Capaciteitsplanning Coatinc Groningen v2.5.6
+
+Grafieken beter leesbaar:
+- Legenda staat nu boven het plotgebied (in één rij), niet meer door de
+  balken heen. Geldt voor beide dashboardgrafieken.
+- De rode 'Aantal balken'-lijn en zijn labels blijven altijd in de
+  onderste ~30 % van het plotgebied, zodat ze niet meer over de
+  kg-totalen bovenaan de staven lopen. Waarde-labels hebben een
+  wit-met-rode-rand kadertje voor extra leesbaarheid.
+- Chart-titels zijn verplaatst naar st.subheader() boven de grafiek
+  (consistent met de rest van het dashboard, geen concurrentie meer
+  tussen titel en legenda).
+
+
 Capaciteitsplanning Coatinc Groningen v2.5.5
 
 OTIF: coat-orders uitsluiten van de verzinkstraat-KPI
