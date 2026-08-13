@@ -1,11 +1,24 @@
-Capaciteitsplanning Coatinc Groningen v2.5.3
+Capaciteitsplanning Coatinc Groningen v2.5.4
 
-Gecombineerde grafiekversie:
-- Schuine datumlabels op beide dashboardgrafieken.
-- Aparte KG-per-traverse-instellingen voor Constructie (standaard 1100),
-  Maatwerk (standaard 850) en Seriewerk (standaard 900).
-- Rode lijn met het berekende aantal balken op de rechter y-as, inclusief
-  waarde-labels per datum. Overig / onbekend gebruikt de Maatwerk-instelling.
+OTIF: coat-orders uitsluiten van de verzinkstraat-KPI
+- Poeder-coat orders (ordernummer volgens patroon <cijfers>C<cijfers>,
+  bijv. 202616661C2) en het coat-deel van gecombineerde verzink+coat-
+  orders (eindigt op '-C', bijv. 202614382VC1-C) worden uit de OTIF-
+  berekening weggelaten. Deze orders horen niet bij de verzinkstraat en
+  zouden de OTIF-score onterecht beïnvloeden.
+- Het verzink-deel van gecombineerde orders (202614382VC1 zonder '-C')
+  blijft wel meetellen — dat is het gedeelte dat op de verzinkstraat
+  geproduceerd wordt.
+
+In de UI:
+- Onder de OTIF-dashboardkaart komt een regel "N coat-orders uitgesloten"
+  als er coat-orders op de peildatum vielen.
+- Het OTIF-tabblad legt de uitsluiting uit en vermeldt het aantal
+  uitgesloten orders.
+- De detailtabel toont automatisch alleen de meetellende orders.
+
+
+Capaciteitsplanning Coatinc Groningen v2.5.3
 
 OTIF depot-shift:
 - Orders met "Aanleveren depot" = 1 (uit OrderExport2G.xlsx) hebben een

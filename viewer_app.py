@@ -2,7 +2,6 @@
 import os
 from datetime import date
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -25,78 +24,9 @@ from shared import (
     render_environment_banner,
     get_page_title,
     is_test_environment,
-    get_locatie_naam,
-    get_locatie_logo,
-    get_poetsen_otif_actief,
 )
 
-st.set_page_config(layout="wide", page_title=get_page_title(f"Capaciteitsplanning {get_locatie_naam()}"))
-
-def bereken_aantal_balken(
-    day_df: pd.DataFrame,
-    kg_per_traverse_constructie: float,
-    kg_per_traverse_maatwerk: float,
-    kg_per_traverse_seriewerk: float,
-) -> pd.DataFrame:
-    """Bereken het totale aantal balken per dag op basis van het materiaaltype."""
-    result = day_df.copy()
-
-    def materiaal_kg(materiaaltype: str) -> pd.Series:
-        col = MATERIAALTYPE_DAG_COLS[materiaaltype]
-        if col in result.columns:
-            return pd.to_numeric(result[col], errors="coerce").fillna(0.0)
-        return pd.Series(0.0, index=result.index)
-
-    result["Aantal_balken_berekend"] = (
-        materiaal_kg("Constructie") / kg_per_traverse_constructie
-        + materiaal_kg("Maatwerk") / kg_per_traverse_maatwerk
-        + materiaal_kg("Seriewerk") / kg_per_traverse_seriewerk
-        + materiaal_kg("Overig / onbekend") / kg_per_traverse_maatwerk
-    )
-    return result
-
-
-def voeg_aantal_balken_lijn_toe(ax, x, plot_df: pd.DataFrame):
-    """Voeg de balkenlijn met waarde-labels en een rechter y-as toe."""
-    aantal_balken = plot_df["Aantal_balken_berekend"].fillna(0).astype(float).to_numpy()
-    ax_right = ax.twinx()
-    lijn, = ax_right.plot(
-        x,
-        aantal_balken,
-        color="#C00000",
-        marker="o",
-        markersize=4,
-        linewidth=2,
-        label="Aantal balken",
-        zorder=5,
-    )
-    ax_right.set_ylabel("Aantal balken", color="#C00000")
-    ax_right.tick_params(axis="y", colors="#C00000")
-    ax_right.spines["top"].set_visible(False)
-    ax_right.spines["right"].set_alpha(0.45)
-    ax_right.grid(False)
-
-    ymax_right = max(aantal_balken) * 1.25 if len(aantal_balken) else 0
-    ymax_right = ymax_right if ymax_right > 0 else 1
-    ax_right.set_ylim(0, ymax_right)
-
-    for i, value in enumerate(aantal_balken):
-        if value > 0:
-            label = f"{value:.1f}".replace(".", ",")
-            ax_right.text(
-                i,
-                value + ymax_right * 0.018,
-                label,
-                ha="center",
-                va="bottom",
-                fontsize=7,
-                fontweight="bold",
-                color="#C00000",
-                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 0.5},
-                zorder=6,
-            )
-    return lijn
-
+st.set_page_config(layout="wide", page_title=get_page_title("Capaciteitsplanning Coatinc Groningen"))
 
 def make_professional_matplotlib_chart(day_df: pd.DataFrame):
     plot_df = day_df.copy()
@@ -126,20 +56,15 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
 
     ax.set_title("Capaciteit versus dagbelasting op verzinkdatum", fontsize=15, pad=14)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha="right", rotation_mode="anchor")
+    ax.set_xticklabels(labels, rotation=0)
     ax.set_ylabel("KG")
-    ax.yaxis.set_major_formatter(
-    FuncFormatter(lambda value, position: format_int(value))
-    )
     ax.grid(axis="y", alpha=0.25)
     ax.set_axisbelow(True)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_alpha(0.3)
     ax.spines["bottom"].set_alpha(0.3)
-    balken_lijn = voeg_aantal_balken_lijn_toe(ax, x, plot_df)
-    handles, legend_labels = ax.get_legend_handles_labels()
-    ax.legend(handles + [balken_lijn], legend_labels + ["Aantal balken"], frameon=False, ncols=4, loc="upper left")
+    ax.legend(frameon=False, ncols=3, loc="upper left")
 
     ymax = max(max(capacity) if capacity else 0, max(load) if load else 0) * 1.15
     if ymax <= 0:
@@ -204,20 +129,15 @@ def make_materiaaltype_matplotlib_chart(day_df: pd.DataFrame):
     load = bottom
     ax.set_title("Tonnage per materiaaltype op verzinkdatum", fontsize=15, pad=14)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha="right", rotation_mode="anchor")
+    ax.set_xticklabels(labels, rotation=0)
     ax.set_ylabel("KG")
-    ax.yaxis.set_major_formatter(
-    FuncFormatter(lambda value, position: format_int(value))
-    )
     ax.grid(axis="y", alpha=0.25)
     ax.set_axisbelow(True)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_alpha(0.3)
     ax.spines["bottom"].set_alpha(0.3)
-    balken_lijn = voeg_aantal_balken_lijn_toe(ax, x, plot_df)
-    handles, legend_labels = ax.get_legend_handles_labels()
-    ax.legend(handles + [balken_lijn], legend_labels + ["Aantal balken"], frameon=False, ncols=3, loc="upper left")
+    ax.legend(frameon=False, ncols=5, loc="upper left")
 
     ymax = max(max(capacity) if capacity else 0, max(load) if len(load) else 0) * 1.15
     if ymax <= 0:
@@ -526,9 +446,8 @@ def make_otif_gauge_svg(
     return "".join(svg_parts)
 
 
-_logo = get_locatie_logo()
-if os.path.exists(_logo):
-    st.sidebar.image(_logo, width=200)
+if os.path.exists("logo_coatinc_groningen.png"):
+    st.sidebar.image("logo_coatinc_groningen.png", width=200)
 st.sidebar.caption(APP_VERSION)
 render_environment_banner("Viewer")
 
@@ -544,14 +463,12 @@ if meta:
     if notes:
         st.sidebar.write(f"Toelichting: {notes}")
 
-st.title(f"Capaciteitsplanning {get_locatie_naam()}")
+st.title("Capaciteitsplanning Coatinc Groningen")
 st.sidebar.header("Instellingen")
 capaciteit_ton = st.sidebar.slider("Max capaciteit per dag (ton)", 50, 90, 60, 5)
 capaciteit_kg = capaciteit_ton * 1000
 offset = st.sidebar.selectbox("Verzinkdatum = leverdatum - X werkdagen", [1, 2, 3, 4], index=1)
-kg_per_traverse_constructie = st.sidebar.number_input("KG per traverse Constructie", min_value=100, max_value=10000, value=1100, step=50)
-kg_per_traverse_maatwerk = st.sidebar.number_input("KG per traverse Maatwerk", min_value=100, max_value=10000, value=850, step=50)
-kg_per_traverse_seriewerk = st.sidebar.number_input("KG per traverse Seriewerk", min_value=100, max_value=10000, value=900, step=50)
+kg_per_traverse = st.sidebar.number_input("KG per traverse", min_value=100, max_value=10000, value=1000, step=100)
 default_start = previous_workday(date.today())
 startdatum = st.sidebar.date_input("Startdatum rapport", value=default_start)
 toon_alle_regels = st.sidebar.checkbox("Toon alle regels in controletab", value=True)
@@ -562,20 +479,7 @@ except Exception as e:
     st.error(f"Kan gepubliceerde data niet laden: {e}")
     st.stop()
 
-df, df_plan, dag, week, advies_datum = build_dashboard_data(
-    df_raw,
-    holiday_df,
-    startdatum,
-    capaciteit_kg,
-    offset,
-    kg_per_traverse_constructie,
-)
-dag = bereken_aantal_balken(
-    dag,
-    kg_per_traverse_constructie,
-    kg_per_traverse_maatwerk,
-    kg_per_traverse_seriewerk,
-)
+df, df_plan, dag, week, advies_datum = build_dashboard_data(df_raw, holiday_df, startdatum, capaciteit_kg, offset, kg_per_traverse)
 
 # ── OTIF-instellingen ────────────────────────────────────────────────────────
 # De peildatum is standaard de dag van de laatste publicatie (het exportmoment
@@ -637,7 +541,6 @@ otif_result = compute_otif(
     date_column=otif_date_column,
     date_column_label=otif_date_label,
     holiday_dates=otif_holiday_dates,
-    poetsen_afgehaald_niet_ok=get_poetsen_otif_actief(),
 )
 
 tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Gebruikte gegevens", "OTIF", "Debug"])
@@ -762,7 +665,19 @@ with tab1:
             if otif_result["onbekend"] > 0:
                 samenvatting += f" · {otif_result['onbekend']} onbekend"
             samenvatting += f" (totaal {otif_result['totaal']})"
-            
+            # Depot-shift: als er depot-orders van de vorige werkdag zijn
+            # meegeteld, laten we dat expliciet zien zodat de gebruiker snapt
+            # waarom er regels met een oudere Leverdatum in de detailtabel
+            # staan.
+            if otif_result.get("depot_shift_actief") and otif_result.get("aantal_depot", 0) > 0:
+                vw = otif_result.get("peildatum_vorige_werkdag")
+                vw_str = pd.Timestamp(vw).strftime("%d-%m-%Y") if vw is not None else ""
+                samenvatting += (
+                    f"<br><span style='font-size:0.78rem; color:#94a3b8;'>"
+                    f"waarvan {otif_result['aantal_depot']} depot-order"
+                    f"{'s' if otif_result['aantal_depot'] != 1 else ''} van {vw_str}"
+                    f"</span>"
+                )
         else:
             samenvatting = "Geen orders met deze peildatum in de dataset."
 
@@ -947,6 +862,16 @@ with tab3:
             f"gemeten. Op deze peildatum tellen depot-orders met leverdatum "
             f"**{vw_str}** mee ({otif_result.get('aantal_depot', 0)} stuks)."
         )
+    n_coat = otif_result.get("aantal_coat_uitgesloten", 0)
+    if n_coat > 0:
+        _caption_regels.append(
+            f"Coat-orders zijn uit deze OTIF weggelaten: **{n_coat}** order"
+            f"{'s' if n_coat != 1 else ''} viel(en) op deze peildatum maar "
+            f"hebben een ordernummer van de vorm `…C…` (coat-alleen) of "
+            f"eindigen op `-C` (coat-deel van een gecombineerde verzink+coat-"
+            f"order). Deze horen niet bij de verzinkstraat en zouden de "
+            f"OTIF-score onterecht beïnvloeden."
+        )
     st.caption(" ".join(_caption_regels))
 
     # Kerngetallen boven de tabel.
@@ -1095,9 +1020,7 @@ with tab4:
     debug_rows = [
         {"Categorie":"Instellingen","Omschrijving":"Startdatum rapport","Waarde":str(startdatum)},
         {"Categorie":"Instellingen","Omschrijving":"Capaciteit per dag (kg)","Waarde":int(capaciteit_kg)},
-        {"Categorie":"Instellingen","Omschrijving":"KG per traverse Constructie","Waarde":int(kg_per_traverse_constructie)},
-        {"Categorie":"Instellingen","Omschrijving":"KG per traverse Maatwerk","Waarde":int(kg_per_traverse_maatwerk)},
-        {"Categorie":"Instellingen","Omschrijving":"KG per traverse Seriewerk","Waarde":int(kg_per_traverse_seriewerk)},
+        {"Categorie":"Instellingen","Omschrijving":"KG per traverse","Waarde":int(kg_per_traverse)},
         {"Categorie":"Bestanden","Omschrijving":"Orderbestand","Waarde":order_file},
         {"Categorie":"Kalender","Omschrijving":"Aantal feestdagen / sluitingen","Waarde":int(len(holiday_df))},
         {"Categorie":"Records","Omschrijving":"Niet verzinkt","Waarde":int((df["Verzinkstatus"] == "Niet verzinkt").sum())},

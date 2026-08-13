@@ -1,0 +1,66 @@
+v2.5.4 OTIF: coat-orders uitsluiten van de verzinkstraat-KPI
+
+Aanleiding: poeder-coat orders (en het coat-deel van gecombineerde
+verzink+coat orders) beïnvloedden de OTIF-score van de verzinkstraat
+onterecht. Dit zijn geen verzinkorders en horen dus niet in deze KPI.
+
+Uitsluitingsregels (case-insensitief):
+
+  1) Coat-alleen orders: ordernummer past bij patroon `<cijfers>C<cijfers>`
+     zonder V ervoor.
+     Voorbeeld: 202616661C2  → UITGESLOTEN
+
+  2) Coat-deel van een gecombineerde verzink+coat-order: ordernummer
+     eindigt op '-C'.
+     Voorbeeld: 202614382VC1-C  → UITGESLOTEN
+
+Blijft dus wél meetellen:
+  - Verzink-alleen orders: 202614382V1
+  - Verzink-deel van gecombineerde orders: 202614382VC1  (VC zonder '-C')
+  - Puur numerieke ordernummers zonder V/C typecode
+  - Ordernummers die niet aan de coat-patronen voldoen
+
+shared.py
+- APP_VERSION → v2.5.4
+- Nieuwe helper `is_otif_excluded_coat_order(ordernummer)`.
+- compute_otif() past de coat-uitsluiting toe NA de datum/depot-mask,
+  zodat de telling het aantal coat-orders geeft dat óp deze peildatum
+  gevallen zou zijn. Nieuw veld in het resultaat-dict:
+    * aantal_coat_uitgesloten
+
+viewer_app.py
+- Dashboard-samenvatting (onder de OTIF-tegel) toont, als er coat-orders
+  zijn uitgesloten:
+    "waarvan 3 depot-orders van 20-07-2026 · 2 coat-orders uitgesloten"
+- OTIF-tabblad caption legt de uitsluiting uit met beide voorbeelden en
+  vermeldt het aantal uitgesloten orders.
+- Detailtabel toont automatisch alleen de meetellende orders (coat-
+  orders staan niet meer in de subset).
+
+Tests (test_otif.py) — 4 nieuw, 15 bestaand blijven groen (19 totaal):
+- test_is_otif_excluded_coat_order — pattern-tests met 16 varianten
+- test_compute_otif_coat_exclusion_end_to_end — combi van verzink,
+  coat-alleen én coat-deel op één peildatum
+- test_compute_otif_coat_exclusion_effect_op_score — regressie-guard:
+  toont dat OTIF significant hoger uitkomt met correcte uitsluiting
+  (57.1% zonder correctie → 100% met correctie in dit scenario)
+- test_compute_otif_only_coat_orders — edge case: alleen coat-orders
+  op peildatum → totaal=0 zonder crash, aantal_coat_uitgesloten=2
+
+Backwards compatible:
+- Ordernummers die niet aan de twee coat-patronen voldoen worden nooit
+  uitgesloten. Bestaande weekexports en OrderExport2G-data werken direct.
+- Signatuur van compute_otif is niet gewijzigd; alleen een extra
+  veld in het resultaat-dict.
+
+Geen wijzigingen in:
+- shared.py verzinkdatum-logica, depot-shift-regel, previous_workday
+- shared.py load_published_data, build_dashboard_data
+- OTIF-tabblad gauge, formule-uitleg en zonebar
+- manager_app.py (byte-voor-byte identiek)
+- upload/publicatie-flow of vereiste bestanden
+
+Realistisch effect:
+Bij een dataset met 4 verzinkorders (Ja) + 3 coat-orders (Nee):
+- v2.5.3 (zonder correctie): OTIF = (1 − 3/7) × 100 = 57.14 %
+- v2.5.4 (met correctie):    OTIF = (1 − 0/4) × 100 =  100.00 %

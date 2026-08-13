@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.3"
+APP_VERSION = "v2.5.4"
 
 
 def get_app_environment() -> str:
@@ -183,16 +183,11 @@ REQUIRED_FILES = [
 # Als aanwezig, worden CGS-orders die NIET al in de weekexports zitten toegevoegd.
 # Als debtor-export.xlsx aanwezig is, wordt het klantsegment/materialtype gekoppeld.
 DEBTOR_EXPORT_FILE = "debtor-export.xlsx"
-# Klanten met 24-uursservice (scheepsleidingen). Als dit bestand aanwezig is,
-# worden deze klanten (op klantnummer) altijd als 'Aanleveren depot = 1'
-# behandeld. Optioneel en per vestiging: ontbreekt het, dan gebeurt er niets.
-SCHEEPSLEIDINGEN_FILE = "scheepsleidingen.xlsx"
-OPTIONAL_FILES = ["Export_CGS.xlsx", DEBTOR_EXPORT_FILE, SCHEEPSLEIDINGEN_FILE]
+OPTIONAL_FILES = ["Export_CGS.xlsx", DEBTOR_EXPORT_FILE]
 
 OPTIONAL_FILE_LABELS = {
     "Export_CGS.xlsx": "Upload Export_CGS.xlsx (optioneel – CGS verzinkplanning)",
     DEBTOR_EXPORT_FILE: "Upload debtor-export.xlsx (optioneel – segment/type materiaal per klant)",
-    SCHEEPSLEIDINGEN_FILE: "Upload scheepsleidingen.xlsx (optioneel – klanten met 24-uursservice; worden als depot behandeld)",
 }
 
 MATERIAALTYPE_ORDER = ["Constructie", "Maatwerk", "Seriewerk", "Overig / onbekend"]
@@ -208,66 +203,7 @@ MATERIAALTYPE_DAG_COLS = {
 # binnen het planningsvenster en voor de juiste locatie.
 RESERVERING_WINDOW_VOOR = 2    # dagen vóór vandaag
 RESERVERING_WINDOW_NA   = 40   # dagen na vandaag
-
-
-# ── Vestiging-specifieke configuratie ──────────────────────────────────────────
-# Alles wat per vestiging verschilt komt uit secrets.toml → [locatie].
-# Zo bedient één codebase meerdere vestigingen. Ontbreekt de sectie of een veld,
-# dan valt de waarde terug op de Groningse standaard (backwards compatible).
-#
-# [locatie]
-# naam                = "Coatinc Groningen"           # titels
-# logo                = "logo_coatinc_groningen.png"  # bestand in repo-root
-# reservering_locatie = "Coatinc Groningen"           # exacte match op 'Locatie V'
-# beheer_wachtwoord   = "coatinc2026"                 # wachtwoord beheeromgeving
-# poetsen_otif_uitzondering = false                   # true = 'Afgehaald' telt niet OK voor poetsen-orders
-
-_LOCATIE_DEFAULTS = {
-    "naam": "Coatinc Groningen",
-    "logo": "logo_coatinc_groningen.png",
-    "beheer_wachtwoord": "coatinc2026",
-}
-
-
-def _get_locatie_setting(key: str, default: str) -> str:
-    try:
-        cfg = st.secrets["locatie"]
-        value = cfg.get(key, "") if hasattr(cfg, "get") else ""
-    except (KeyError, FileNotFoundError):
-        value = ""
-    value = str(value).strip()
-    return value if value else default
-
-
-def get_locatie_naam() -> str:
-    """Weergavenaam van de vestiging (gebruikt in de paginatitels)."""
-    return _get_locatie_setting("naam", _LOCATIE_DEFAULTS["naam"])
-
-
-def get_locatie_logo() -> str:
-    """Bestandsnaam van het logo in de repo-root."""
-    return _get_locatie_setting("logo", _LOCATIE_DEFAULTS["logo"])
-
-
-def get_beheer_wachtwoord() -> str:
-    """Wachtwoord voor de beheeromgeving."""
-    return _get_locatie_setting("beheer_wachtwoord", _LOCATIE_DEFAULTS["beheer_wachtwoord"])
-
-
-def get_reservering_locatie() -> str:
-    """Waarde waarop 'Locatie V' exact moet matchen voor reserveringen.
-    Valt terug op de vestigingsnaam als niet apart gezet."""
-    return _get_locatie_setting("reservering_locatie", get_locatie_naam())
-
-
-def get_poetsen_otif_actief() -> bool:
-    """True als de poetsen-uitzondering op OTIF actief is voor deze vestiging.
-    Zet in secrets: [locatie] poetsen_otif_uitzondering = true.
-    Effect: voor orders waarvan PrijsCategorie 'poetsen' bevat, telt de status
-    'Afgehaald' op de peildatum als niet OK (i.p.v. OK). Overige statussen
-    volgen de normale OTIF-regels. Standaard uit (Groningen ongewijzigd)."""
-    val = _get_locatie_setting("poetsen_otif_uitzondering", "false")
-    return str(val).strip().lower() in ("true", "1", "ja", "yes", "aan")
+RESERVERING_LOCATIE     = "Coatinc Groningen"
 
 _TEMP_DIR = Path(tempfile.gettempdir()) / "cap_planning_cache"
 
@@ -465,56 +401,6 @@ def _load_debtor_segment_lookup(tmp: Path) -> pd.DataFrame:
     return lookup[["Debiteurnummer_key", "Klantnaam_key", "Segment_debtor_export", "Materiaaltype"]]
 
 
-def _load_scheepsleidingen_ids(tmp: Path) -> set:
-    """
-    Lees scheepsleidingen.xlsx en geef de set genormaliseerde klantnummers van
-    klanten met 24-uursservice. Deze klanten worden verderop altijd als
-    'Aanleveren depot = 1' behandeld.
-
-    Het bestand is optioneel: ontbreekt het, dan een lege set (geen effect).
-    Als de kolom 'is_active' aanwezig is, tellen alleen actieve klanten mee.
-    Het klantnummer wordt flexibel gezocht (kolom 'number' of varianten).
-    """
-    path = tmp / SCHEEPSLEIDINGEN_FILE
-    if not path.exists():
-        return set()
-
-    df = pd.read_excel(path)
-    num_col = _find_first_existing_column(
-        df,
-        ["number", "Debiteurnummer", "ID Debiteur", "Klantnummer", "customer_number", "debtor_number"],
-    )
-    if not num_col:
-        return set()
-
-    if "is_active" in df.columns:
-        df = df[df["is_active"].astype(str).str.strip().str.lower() == "active"]
-
-    keys = _normalize_number_key(df[num_col])
-    return {k for k in keys if k}
-
-
-def _force_scheepsleidingen_depot(order: pd.DataFrame, scheeps_ids: set) -> pd.DataFrame:
-    """
-    Zet 'Aanleveren depot' op 1 voor orders van scheepsleidingen-klanten
-    (24-uursservice), gematcht op klantnummer. Retourneert het (aangepaste)
-    order-DataFrame. Lege set of ontbrekende kolommen → ongewijzigd.
-    """
-    if not scheeps_ids or order is None or order.empty:
-        return order
-    if "Aanleveren depot" not in order.columns:
-        return order
-    num_col = _find_first_existing_column(
-        order,
-        ["ID Debiteur", "Debiteurnummer", "Klantnummer", "customer_number", "number"],
-    )
-    if not num_col:
-        return order
-    is_scheeps = _normalize_number_key(order[num_col]).isin(scheeps_ids)
-    order.loc[is_scheeps, "Aanleveren depot"] = 1
-    return order
-
-
 def _attach_debtor_segments(df: pd.DataFrame, debtor_lookup: pd.DataFrame) -> pd.DataFrame:
     """Voeg Segment_debtor_export en Materiaaltype toe aan orderregels."""
     out = df.copy()
@@ -627,11 +513,10 @@ def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataF
     """
     Identificeer reserveringen: orders in OrderExport2G die nog NIET in de
     CGS-exports staan, binnen het planningsvenster en uitsluitend voor
-    Locatie V = get_reservering_locatie() (per vestiging via secrets).
+    Locatie V = RESERVERING_LOCATIE ("Coatinc Groningen").
 
     Aangepaste reserveringslogica:
-      - Alleen meenemen als Locatie V exact gelijk is aan de ingestelde
-        vestigingswaarde (get_reservering_locatie()) na trimmen.
+      - Alleen meenemen als Locatie V exact "Coatinc Groningen" is na trimmen.
         Lege Locatie V of ontbrekende Locatie V wordt niet meegenomen.
       - Verzinkdatum reservering:
           1. Als Leverdatum V is gevuld: Leverdatum V - 2 werkdagen.
@@ -673,7 +558,7 @@ def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataF
     if not locatie_col:
         return pd.DataFrame()
 
-    locatie_match = order[locatie_col].astype(str).str.strip().eq(get_reservering_locatie())
+    locatie_match = order[locatie_col].astype(str).str.strip().eq(RESERVERING_LOCATIE)
 
     # Basisfilter: niet in CGS-exports + binnen tijdvenster + juiste locatie.
     # Het tijdvenster blijft gebaseerd op Datum verzending, conform bronexport.
@@ -831,12 +716,6 @@ def load_published_data():
     order = pd.read_excel(tmp / "OrderExport2G.xlsx")
     holiday_df = pd.read_excel(tmp / "feestdagen.xlsx")
     debtor_lookup = _load_debtor_segment_lookup(tmp)
-
-    # Scheepsleidingen-klanten (24-uursservice) altijd als depot behandelen,
-    # gelijk aan 'Aanleveren depot = 1'. We forceren dit op de order-data zodat
-    # het meeloopt in zowel de OTIF-depotshift/verzinkdatum (via de merge) als
-    # de reserveringen. Optioneel bestand: ontbreekt het, dan geen effect.
-    order = _force_scheepsleidingen_depot(order, _load_scheepsleidingen_ids(tmp))
 
     # ── 3. Basiskolommen aanmaken ─────────────────────────────────────────
     export["Gewicht_export_kg"] = coerce_numeric(export["Gewicht"])
@@ -1309,6 +1188,49 @@ def map_otif_status(status) -> str:
     return OTIF_STATUS_MAP.get(key, "Onbekend")
 
 
+# ── OTIF: uitsluiten van (poeder)coat-orders ──────────────────────────────────
+# Poeder-coat orders horen niet in de OTIF van de verzinkstraat.
+# Twee patronen om uit te sluiten:
+#   1) Coat-alleen orders — typecode is enkel 'C' (geen V ervoor).
+#      Voorbeeld: 202616661C2
+#   2) Coat-deel van gecombineerde verzink+coat-orders — eindigt op '-C'.
+#      Voorbeeld: 202614382VC1-C
+# Wél meegenomen (verzink):
+#   - Verzink-alleen orders (bevatten helemaal geen C): 202614382V1
+#   - Verzink-deel van gecombineerde orders (VC zonder '-C' suffix):
+#     202614382VC1
+_OTIF_COAT_ONLY_PATTERN = re.compile(r"^\d+C\d*$", re.IGNORECASE)
+
+
+def is_otif_excluded_coat_order(ordernummer) -> bool:
+    """
+    Retourneer True voor coat-orders die NIET in de OTIF-berekening horen.
+
+    Uitgesloten:
+    - Coat-alleen: ordernummer matcht `<cijfers>C<optionele cijfers>` zonder
+      V ervoor (bijv. 202616661C2).
+    - Coat-deel van een gecombineerde verzink+coat-order: ordernummer eindigt
+      op '-C' (bijv. 202614382VC1-C).
+
+    Niet uitgesloten (blijft dus meetellen in OTIF):
+    - Verzink-alleen orders zoals 202614382V1
+    - Verzink-deel van gecombineerde orders zoals 202614382VC1
+    - Ordernummers die niet aan bovenstaande patronen voldoen
+
+    Case-insensitief. NaN en lege waarden worden nooit uitgesloten.
+    """
+    if pd.isna(ordernummer):
+        return False
+    s = str(ordernummer).strip()
+    if not s:
+        return False
+    if s.upper().endswith("-C"):
+        return True
+    if _OTIF_COAT_ONLY_PATTERN.match(s):
+        return True
+    return False
+
+
 def find_originele_leverdatum_column(df: pd.DataFrame) -> str | None:
     """
     Zoek in `df` een kolom die de originele leverdatum bevat. Retourneert de
@@ -1333,6 +1255,7 @@ def _empty_otif_result(peildatum, date_column: str, date_column_label: str) -> d
         "date_column_label": date_column_label,
         "depot_shift_actief": False,
         "aantal_depot": 0,
+        "aantal_coat_uitgesloten": 0,
         "orders": pd.DataFrame(),
     }
 
@@ -1345,8 +1268,6 @@ def compute_otif(
     holiday_dates: set | None = None,
     depot_column: str = "Aanleveren depot",
     apply_depot_shift: bool = True,
-    poetsen_afgehaald_niet_ok: bool = False,
-    prijscategorie_column: str = "PrijsCategorie",
 ) -> dict:
     """
     Bereken de OTIF-KPI over orders waarvan de te toetsen datum gelijk is aan
@@ -1372,12 +1293,6 @@ def compute_otif(
     - `holiday_dates` zorgt ervoor dat 'vorige werkdag' feestdagen overslaat.
     - Zonder depot-kolom of met `apply_depot_shift=False` valt de logica
       terug op de oorspronkelijke datum-vergelijking.
-
-    Poetsen-uitzondering (per vestiging, standaard uit):
-    - Met `poetsen_afgehaald_niet_ok=True` telt voor orders waarvan de kolom
-      `prijscategorie_column` (default 'PrijsCategorie') de tekst 'poetsen'
-      bevat, de status 'Afgehaald' als niet OK ('Nee') i.p.v. OK. Alle andere
-      statussen volgen de normale OTIF-mapping.
 
     Formule conform gebruikersspecificatie:
         OTIF = (1 - aantal te laat / totaal aantal orders) * 100 %
@@ -1425,18 +1340,25 @@ def compute_otif(
         result["depot_shift_actief"] = depot_shift_actief
         return result
 
+    # Sluit poeder-coat orders uit; deze horen niet in de OTIF van de
+    # verzinkstraat. Filteren gebeurt NA de datum/depot-mask zodat de
+    # telling meteen zinvol is voor de gekozen peildatum.
+    aantal_coat_uitgesloten = 0
+    if "Nummer" in subset.columns:
+        is_coat_excl = subset["Nummer"].apply(is_otif_excluded_coat_order)
+        aantal_coat_uitgesloten = int(is_coat_excl.sum())
+        if aantal_coat_uitgesloten:
+            subset = subset.loc[~is_coat_excl].copy()
+
+    # Kan leeg worden als álle relevante orders coat waren.
+    if subset.empty:
+        result = _empty_otif_result(peildatum, date_column, label)
+        result["peildatum_vorige_werkdag"] = vorige_werkdag
+        result["depot_shift_actief"] = depot_shift_actief
+        result["aantal_coat_uitgesloten"] = aantal_coat_uitgesloten
+        return result
+
     subset["OTIF_status"] = subset["Status"].apply(map_otif_status)
-
-    # Poetsen-uitzondering (per vestiging): voor orders waarvan PrijsCategorie
-    # 'poetsen' bevat, telt de status 'Afgehaald' op de peildatum als niet OK
-    # ('Nee') in plaats van OK. Overige statussen volgen de normale regels.
-    if poetsen_afgehaald_niet_ok and prijscategorie_column in subset.columns:
-        is_poetsen = (
-            subset[prijscategorie_column].astype(str).str.contains("poetsen", case=False, na=False)
-        )
-        is_afgehaald = subset["Status"].astype(str).str.strip().str.casefold() == "afgehaald"
-        subset.loc[is_poetsen & is_afgehaald, "OTIF_status"] = "Nee"
-
     # Boolean voor duidelijkheid in de detailtabel én in de samenvatting.
     if depot_shift_actief:
         subset["Is_depot"] = is_depot.loc[subset.index]
@@ -1466,6 +1388,7 @@ def compute_otif(
         "date_column_label": label,
         "depot_shift_actief": depot_shift_actief,
         "aantal_depot": aantal_depot,
+        "aantal_coat_uitgesloten": aantal_coat_uitgesloten,
         "orders": subset,
     }
 
