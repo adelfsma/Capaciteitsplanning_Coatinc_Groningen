@@ -1,3 +1,15 @@
+Capaciteitsplanning Coatinc Groningen v2.5.7
+
+Grafieken – definitieve fix voor overlap:
+- Rode 'Aantal balken'-labels staan nu in een vaste rij onderaan de
+  plot (in wit-met-rode-rand pilletjes). Kunnen daardoor principieel
+  niet meer over kg-totalen of segment-labels vallen.
+- De rode lijn + markers blijven in de onderste 40 % van het plotgebied,
+  dus lopen ook nooit meer door de kg-totalen bovenaan de balken.
+- Geldt voor beide dashboardgrafieken (Capaciteit versus dagbelasting
+  en Materiaaltype per verzinkdatum).
+
+
 Capaciteitsplanning Coatinc Groningen v2.5.6
 
 Grafieken beter leesbaar:

@@ -59,13 +59,13 @@ def bereken_aantal_balken(
 def voeg_aantal_balken_lijn_toe(ax, x, plot_df: pd.DataFrame):
     """Voeg de balkenlijn met waarde-labels en een rechter y-as toe.
 
-    Om te voorkomen dat de rode balken-labels over de kg-totalen van de
-    staafgrafiek heen vallen, wordt de secundaire y-as bewust ruim geschaald:
-    de hoogste rode waarde komt op ~40 % van de zichtbare plot-hoogte te
-    liggen, waardoor lijn en labels altijd in de onderste helft blijven en de
-    kg-totalen boven de balken vrij zicht houden. Elk label krijgt bovendien
-    een subtiel wit-met-rode-rand kadertje zodat 't ook in drukke gebieden
-    leesbaar blijft.
+    De rode lijn zelf loopt door het volle plotgebied (visueel: trend van
+    de dag-belasting). De waarde-labels staan echter in een vaste rij
+    onderaan het plotgebied, net boven de x-as. Op die manier kunnen ze
+    nooit overlappen met de kg-totalen bovenaan de staven, met de segment-
+    labels binnenin de staven, of met de legenda bovenaan. Elk label
+    krijgt bovendien een subtiel wit-met-rode-rand kadertje voor extra
+    leesbaarheid.
     """
     aantal_balken = plot_df["Aantal_balken_berekend"].fillna(0).astype(float).to_numpy()
     ax_right = ax.twinx()
@@ -85,25 +85,28 @@ def voeg_aantal_balken_lijn_toe(ax, x, plot_df: pd.DataFrame):
     ax_right.spines["right"].set_alpha(0.45)
     ax_right.grid(False)
 
-    # Schaal secundaire as zo dat de hoogste balken-waarde op ~30 % van de
-    # plot-hoogte zit; dat garandeert vertical scheiding tussen de balken-
-    # labels en de kg-totalen bovenaan de staven, en ook met de segment-
-    # labels binnen de staven.
+    # Secundaire y-as ruim schalen: de hoogste rode waarde komt op ~40 %
+    # van de plot-hoogte. Zo blijven de lijn en zijn markers altijd in de
+    # onderste helft van het plotgebied en kunnen ze nooit door de kg-
+    # totalen bovenaan de staven heen lopen.
     max_val = float(max(aantal_balken)) if len(aantal_balken) else 0.0
-    if max_val > 0:
-        ymax_right = max_val / 0.30
-    else:
-        ymax_right = 1.0
+    ymax_right = (max_val / 0.40) if max_val > 0 else 1.0
     ax_right.set_ylim(0, ymax_right)
 
+    # Waarde-labels in een vaste rij onderaan het plotgebied. De
+    # x-coördinaat is de dag (data), de y-coördinaat een vaste fractie
+    # van de as (get_xaxis_transform combineert dit correct). Doordat
+    # alle labels dezelfde y-positie hebben kunnen ze niet meer met
+    # andere labels of balken overlappen.
+    trans = ax_right.get_xaxis_transform()
     for i, value in enumerate(aantal_balken):
         if value > 0:
             label = f"{value:.1f}".replace(".", ",")
-            ax_right.annotate(
+            ax_right.text(
+                i,
+                0.02,
                 label,
-                xy=(i, value),
-                xytext=(0, 7),
-                textcoords="offset points",
+                transform=trans,
                 ha="center",
                 va="bottom",
                 fontsize=7,
@@ -117,6 +120,7 @@ def voeg_aantal_balken_lijn_toe(ax, x, plot_df: pd.DataFrame):
                     "alpha": 0.95,
                 },
                 zorder=6,
+                clip_on=False,
             )
     return lijn
 

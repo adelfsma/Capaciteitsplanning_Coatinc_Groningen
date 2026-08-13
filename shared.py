@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.6"
+APP_VERSION = "v2.5.7"
 
 
 def get_app_environment() -> str:
