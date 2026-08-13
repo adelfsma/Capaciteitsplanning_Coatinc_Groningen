@@ -1,0 +1,77 @@
+v2.5.5 OTIF: coat-orders uitsluiten van de verzinkstraat-KPI
+
+Deze release integreert de coat-uitsluiting bovenop de main-branch die
+tussentijds is uitgebreid met de traverse-balken-berekening per materiaal-
+type. Alle bestaande features (OTIF, depot-shift, poetsen-uitzondering,
+traverses per materiaaltype, Aantal-balken-overlay op de charts) blijven
+volledig intact.
+
+Nieuw in v2.5.5:
+
+Poeder-coat orders horen niet in de OTIF van de verzinkstraat en worden
+weggefilterd. Twee patronen (case-insensitief):
+
+  1) Coat-alleen orders: ordernummer past bij `<cijfers>C<cijfers>`
+     zonder V ervoor.
+     Voorbeeld: 202616661C2  → UITGESLOTEN
+
+  2) Coat-deel van een gecombineerde verzink+coat-order: ordernummer
+     eindigt op '-C'.
+     Voorbeeld: 202614382VC1-C  → UITGESLOTEN
+
+Blijft dus wél meetellen:
+  - Verzink-alleen orders: 202614382V1
+  - Verzink-deel van gecombineerde orders: 202614382VC1  (VC zonder '-C')
+  - Puur numerieke ordernummers zonder V/C typecode
+  - Ordernummers die niet aan de coat-patronen voldoen
+
+shared.py
+- APP_VERSION → v2.5.5
+- Nieuwe helper `is_otif_excluded_coat_order(ordernummer)`.
+- compute_otif() past de coat-uitsluiting toe NA de datum/depot-mask
+  én NA de statusmapping (inclusief poetsen-uitzondering), zodat de
+  telling het aantal coat-orders geeft dat óp deze peildatum meegeteld
+  zou zijn. Nieuw veld in het resultaat-dict:
+    * aantal_coat_uitgesloten
+- Docstring van compute_otif uitgebreid met paragraaf "Coat-uitsluiting".
+
+viewer_app.py
+- OTIF-tabblad caption legt de uitsluiting uit met beide voorbeelden en
+  vermeldt het aantal uitgesloten orders (indien > 0).
+- Detailtabel toont automatisch alleen de meetellende orders (coat-
+  orders staan niet meer in de subset).
+- De dashboardkaart-samenvatting blijft compact (geen sub-note), conform
+  eerdere gebruikersvoorkeur.
+
+Tests (test_otif.py) — 19 stuks, alle groen:
+- Bestaande 15 tests uit v2.5.4 blijven groen (backwards compatible).
+- 4 nieuwe testen voor coat-uitsluiting:
+  * test_is_otif_excluded_coat_order — pattern-tests met 16 varianten
+  * test_compute_otif_coat_exclusion_end_to_end — combi van verzink,
+    coat-alleen én coat-deel op één peildatum
+  * test_compute_otif_coat_exclusion_effect_op_score — regressie-guard
+  * test_compute_otif_only_coat_orders — edge case
+- Handmatige regressie-check: coat-uitsluiting + poetsen-uitzondering
+  gecombineerd geeft correcte uitkomst (2 coat weggefilterd, poetsen-
+  Afgehaald blijft als Nee tellen).
+
+Backwards compatible:
+- Ordernummers die niet aan de twee coat-patronen voldoen worden nooit
+  uitgesloten. Bestaande weekexports en OrderExport2G-data werken direct.
+- Signatuur van compute_otif is niet gewijzigd; alleen een extra veld
+  in het resultaat-dict.
+- Alle main-features (traverses per materiaaltype, Aantal balken op de
+  charts, poetsen-uitzondering) zijn 1-op-1 behouden.
+
+Geen wijzigingen in:
+- traverse-berekening en Aantal-balken-lijn (main-functionaliteit)
+- verzinkdatum-logica, depot-shift-regel, previous_workday
+- load_published_data, build_dashboard_data
+- OTIF-tabblad gauge, formule-uitleg en zonebar
+- manager_app.py
+- upload/publicatie-flow of vereiste bestanden
+
+Realistisch effect:
+Bij een dataset met 4 verzinkorders (Ja) + 3 coat-orders (Nee):
+- Zonder correctie: OTIF = (1 − 3/7) × 100 = 57.14 %
+- Met correctie:    OTIF = (1 − 0/4) × 100 =  100.00 %

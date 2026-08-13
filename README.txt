@@ -1,6 +1,10 @@
-Capaciteitsplanning Coatinc Groningen v2.5.4
+Capaciteitsplanning Coatinc Groningen v2.5.5
 
 OTIF: coat-orders uitsluiten van de verzinkstraat-KPI
+- Deze release combineert de main-branch functionaliteit (traverses per
+  materiaaltype met Constructie / Maatwerk / Seriewerk, Aantal-balken-
+  overlay op beide grafieken, poetsen-uitzondering) met de nieuwe
+  coat-uitsluiting voor OTIF.
 - Poeder-coat orders (ordernummer volgens patroon <cijfers>C<cijfers>,
   bijv. 202616661C2) en het coat-deel van gecombineerde verzink+coat-
   orders (eindigt op '-C', bijv. 202614382VC1-C) worden uit de OTIF-
@@ -11,11 +15,13 @@ OTIF: coat-orders uitsluiten van de verzinkstraat-KPI
   geproduceerd wordt.
 
 In de UI:
-- Onder de OTIF-dashboardkaart komt een regel "N coat-orders uitgesloten"
-  als er coat-orders op de peildatum vielen.
 - Het OTIF-tabblad legt de uitsluiting uit en vermeldt het aantal
   uitgesloten orders.
 - De detailtabel toont automatisch alleen de meetellende orders.
+- De dashboardkaart blijft compact (geen extra sub-note).
+
+
+Capaciteitsplanning Coatinc Groningen v2.5.4
 
 
 Capaciteitsplanning Coatinc Groningen v2.5.3
