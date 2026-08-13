@@ -1,0 +1,51 @@
+v2.5.7 Grafieken: balken-labels in vaste rij onderaan
+
+Aanleiding: gebruikersfeedback op v2.5.6 – de rode 'Aantal balken'-labels
+kwamen nog steeds soms over de kg-totalen of segment-labels te liggen,
+omdat ze relatief werden geplaatst t.o.v. de datapunten. Bovendien
+liep de rode lijn met markers regelmatig door het label 'kg-totaal'
+bovenaan de balken.
+
+Wijziging (viewer_app.py, functie `voeg_aantal_balken_lijn_toe`):
+
+1) Balken-labels in een vaste rij onderaan het plotgebied
+   - Alle rode waarde-labels staan nu op één vaste y-positie
+     (`transform=get_xaxis_transform()`, y=0.02 = 2 % van plot-hoogte
+     boven de x-as). De x-coördinaat blijft de dag/kolom-index.
+   - Doordat alle labels dezelfde y-positie hebben, kunnen ze
+     principieel niet met andere labels of balken overlappen —
+     ongeacht data of grafiektype.
+
+2) Lijn + markers blijven in de onderste 40 %
+   - Secundaire y-as: `ymax_right = max_val / 0.40`. De hoogste rode
+     waarde komt daardoor op ~40 % plot-hoogte terecht.
+   - De lijn en markers lopen dus altijd door de onderste helft van
+     de plot en kunnen nooit door de kg-totalen bovenaan de balken
+     heen lopen (die zitten allemaal in de bovenste helft).
+
+Combinatie 1+2 garandeert:
+   - kg-totalen bovenaan de balken: volledig vrij
+   - segment-labels binnenin de balken: leesbaar
+   - rode lijn + markers: puur trend-indicator in onderste helft
+   - rode balken-labels: precies onderaan, in vaste rij, met wit-met-
+     rode-rand kadertje voor extra contrast
+
+shared.py
+- APP_VERSION → v2.5.7
+
+Geen wijzigingen in:
+- OTIF-berekening, depot-shift, coat-uitsluiting, poetsen-uitzondering
+- traverse-berekening per materiaaltype
+- Aantal-balken-formule zelf
+- shared.py functionele logica
+- manager_app.py (byte-voor-byte identiek)
+- upload/publicatie-flow
+
+Tests: alle 19 OTIF-tests blijven groen. Grafiek-wijziging is puur
+visueel en gevalideerd met render-previews van beide grafieken.
+
+Antwoord op vraag over de primaire y-as:
+De primaire y-as (KG) is dynamisch en beweegt mee met de data:
+    ymax = max(capaciteit, hoogste dagbelasting) * 1.15
+Bij capaciteit 60 t en hoogste dagbelasting 77.177 kg komt de as
+uit op ~89 kg (weergegeven als ~90 t). Dit gedrag is niet gewijzigd.
