@@ -1012,6 +1012,14 @@ with tab3:
             f"gemeten. Op deze peildatum tellen depot-orders met leverdatum "
             f"**{vw_str}** mee ({otif_result.get('aantal_depot', 0)} stuks)."
         )
+    n_ub = otif_result.get("aantal_ub_uitgesloten", 0)
+    if n_ub > 0:
+        _caption_regels.append(
+            f"UB-orders (uitbesteed) zijn uit deze OTIF weggelaten: "
+            f"**{n_ub}** order{'s' if n_ub != 1 else ''}, ongeacht of ze als "
+            f"'Ja' of 'Nee' zouden zijn geteld. UB hoort niet bij de "
+            f"verzinkstraat."
+        )
     n_coat = otif_result.get("aantal_coat_uitgesloten", 0)
     if n_coat > 0:
         _caption_regels.append(
