@@ -1,0 +1,52 @@
+v2.5.8 Capaciteitsplanning: coat-orders en ontzinkt-orders uitsluiten
+
+Geldt voor alle vestigingen (CGR en CAL) — geen locatie-specifieke flag,
+de wijziging zit in de gedeelde logica in shared.py.
+
+1) Coat-orders (nieuw)
+   Coat-orders horen niet in de verzinkstraat-capaciteitsplanning en
+   krijgen voortaan altijd "Nee" in Meegeteld_in_planning, ongeacht
+   status of planningshorizon. Reden_uitsluiting = "Coat-order".
+
+   Twee patronen (case-insensitief), zelfde classificatie als eerder al
+   gebruikt bij de OTIF-KPI (is_otif_excluded_coat_order):
+     - Coat-alleen: ordernummer "<cijfers>C<cijfers>" zonder V ervoor.
+       Voorbeeld: 202616873C1 → UITGESLOTEN
+     - Coat-deel van een gecombineerde verzink+coat-order: ordernummer
+       eindigt op '-C'.
+       Voorbeeld: 202615352VC1-C → UITGESLOTEN
+   Blijft dus wél meetellen:
+     - Het verzink-deel van dezelfde combi-order: 202615352VC1-V
+
+2) Ontzinkt-orders (gewijzigd)
+   STATUS_MAP: "Ontzinkt" mapt nu naar "Verzinkt" i.p.v. "Niet verzinkt".
+   Ontzinkte orders lopen daardoor mee in de bestaande mask_verzinkt-tak:
+   Meegeteld_in_planning = "Nee", Reden_uitsluiting = "Status = Verzinkt".
+
+Wijzigingen
+- shared.py
+  - APP_VERSION → v2.5.8
+  - STATUS_MAP["Ontzinkt"] = "Verzinkt" (was "Niet verzinkt")
+  - build_dashboard_data(): nieuw masker na de bestaande
+    Meegeteld_in_planning-logica dat coat-orders (via Nummer-kolom en
+    is_otif_excluded_coat_order) op "Nee" / "Coat-order" zet, en zo een
+    eerder gezette "Ja" weer overschrijft.
+- viewer_app.py
+  - Debug-samenvatting (tab4) toont nu ook het aantal uitgesloten
+    coat-orders als aparte regel onder "Records".
+
+Validatie
+- py_compile op beide bestanden: geslaagd.
+- Smoke test met synthetische data (5 orders: coat-alleen, coat-deel
+  combi, verzink-deel combi, normale verzinkorder, ontzinkt-order)
+  bevestigt het verwachte gedrag:
+      202616873C1     → Nee / Coat-order
+      202615352VC1-C  → Nee / Coat-order
+      202615352VC1-V  → Ja
+      202612345V1     → Ja
+      <order> Ontzinkt→ Nee / Status = Verzinkt
+- Geen bestaande pytest-suite (test_otif.py e.d.) in dit gesprek
+  beschikbaar om lokaal te draaien; aanbevolen om die na upload naar
+  Test alsnog te draaien vóór de merge naar main.
+
+manager_app.py is niet aangeraakt.

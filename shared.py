@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.7"
+APP_VERSION = "v2.5.8"
 
 
 def get_app_environment() -> str:
@@ -83,6 +83,7 @@ STATUS_MAP = {
     "coat gereed": "Verzinkt",
     "Gereed": "Verzinkt",
     "Nabewerking nog uitvoeren": "Verzinkt",
+    "Ontzinkt": "Verzinkt",                 # ontzinkt telt niet als 'nog te verzinken'
     # UB (uitbesteed)
     "UB": "UB",
     "UB V Gereed": "UB",
@@ -91,7 +92,6 @@ STATUS_MAP = {
     "PC Opgehangen": "Niet verzinkt",       # zelfde als Opgehangen
     "Voorbewerking uitvoeren": "Niet verzinkt",
     "Productie gereed": "Niet verzinkt",
-    "Ontzinkt": "Niet verzinkt",
     "Gereserveerd*": "Niet verzinkt",       # reserveringen meenemen in planning
     "Geblokkeerd": "Niet verzinkt",         # geblokkeerd maar nog niet verzinkt
     # Overig
@@ -1289,6 +1289,18 @@ def build_dashboard_data(
     df.loc[mask_niet_verzinkt & ~mask_binnen_horizon, "Reden_uitsluiting"] = "Voor startdatum rapport"
     df.loc[mask_niet_verzinkt &  mask_binnen_horizon, "Meegeteld_in_planning"] = "Ja"
     df.loc[mask_niet_verzinkt &  mask_binnen_horizon, "Reden_uitsluiting"]     = ""
+
+    # Coat-orders horen niet in de verzinkstraat-capaciteitsplanning en worden
+    # daarom altijd uitgesloten, ongeacht status/horizon. Twee patronen
+    # (case-insensitief), zelfde classificatie als bij de OTIF-KPI:
+    #   1) Coat-alleen: '<cijfers>C<cijfers>' zonder V ervoor (202616873C1)
+    #   2) Coat-deel van combi-order: eindigt op '-C' (202615352VC1-C)
+    # Het verzink-deel van combi-orders (202615352VC1-V) blijft wél meetellen.
+    # Geldt voor alle vestigingen (CGR en CAL); geen locatie-specifieke flag.
+    if "Nummer" in df.columns:
+        mask_coat_order = df["Nummer"].apply(is_otif_excluded_coat_order)
+        df.loc[mask_coat_order, "Meegeteld_in_planning"] = "Nee"
+        df.loc[mask_coat_order, "Reden_uitsluiting"]     = "Coat-order"
 
     df_plan = df[df["Meegeteld_in_planning"] == "Ja"].copy()
 
