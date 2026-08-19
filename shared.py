@@ -168,7 +168,11 @@ ORIGINELE_LEVERDATUM_CANDIDATES = [
 
 NL_DAY_ABBR = {0: "ma", 1: "di", 2: "wo", 3: "do", 4: "vr", 5: "za", 6: "zo"}
 
-REQUIRED_FILES = [
+# Standaard (Groningen) vereiste bestanden. Per vestiging kan een kleinere
+# vereiste set gelden (zie _compute_file_lists); OrderExport2G.xlsx is altijd
+# vereist. De uiteindelijke REQUIRED_FILES/OPTIONAL_FILES worden lager in dit
+# bestand berekend, zodra de locatie-config beschikbaar is.
+_DEFAULT_REQUIRED_FILES = [
     "OrderExport2G.xlsx",
     "Export-1.xlsx",
     "Export.xlsx",
@@ -187,12 +191,17 @@ DEBTOR_EXPORT_FILE = "debtor-export.xlsx"
 # worden deze klanten (op klantnummer) altijd als 'Aanleveren depot = 1'
 # behandeld. Optioneel en per vestiging: ontbreekt het, dan gebeurt er niets.
 SCHEEPSLEIDINGEN_FILE = "scheepsleidingen.xlsx"
-OPTIONAL_FILES = ["Export_CGS.xlsx", DEBTOR_EXPORT_FILE, SCHEEPSLEIDINGEN_FILE]
+_BASE_OPTIONAL_FILES = ["Export_CGS.xlsx", DEBTOR_EXPORT_FILE, SCHEEPSLEIDINGEN_FILE]
 
 OPTIONAL_FILE_LABELS = {
     "Export_CGS.xlsx": "Upload Export_CGS.xlsx (optioneel – CGS verzinkplanning)",
     DEBTOR_EXPORT_FILE: "Upload debtor-export.xlsx (optioneel – segment/type materiaal per klant)",
     SCHEEPSLEIDINGEN_FILE: "Upload scheepsleidingen.xlsx (optioneel – klanten met 24-uursservice; worden als depot behandeld)",
+    "feestdagen.xlsx": "Upload feestdagen.xlsx (optioneel voor deze vestiging – feestdagenkalender)",
+    "Export+1.xlsx": "Upload Export+1.xlsx (optioneel voor deze vestiging)",
+    "Export+2.xlsx": "Upload Export+2.xlsx (optioneel voor deze vestiging)",
+    "Export+3.xlsx": "Upload Export+3.xlsx (optioneel voor deze vestiging)",
+    "Export+4.xlsx": "Upload Export+4.xlsx (optioneel voor deze vestiging)",
 }
 
 MATERIAALTYPE_ORDER = ["Constructie", "Maatwerk", "Seriewerk", "Overig / onbekend"]
@@ -221,6 +230,14 @@ RESERVERING_WINDOW_NA   = 40   # dagen na vandaag
 # reservering_locatie = "Coatinc Groningen"           # exacte match op 'Locatie V'
 # beheer_wachtwoord   = "coatinc2026"                 # wachtwoord beheeromgeving
 # poetsen_otif_uitzondering = false                   # true = 'Afgehaald' telt niet OK voor poetsen-orders
+# max_capaciteit_min = 50                             # dagcapaciteit-slider (ton): minimum
+# max_capaciteit_max = 90                             # dagcapaciteit-slider (ton): maximum
+# max_capaciteit_default = 60                         # dagcapaciteit-slider (ton): startwaarde
+# kg_traverse_constructie = 1300                      # default KG per traverse Constructie
+# kg_traverse_maatwerk = 840                          # default KG per traverse Maatwerk
+# kg_traverse_seriewerk = 930                         # default KG per traverse Seriewerk
+# otif_uitsluiten_statussen = ""                      # komma-gescheiden statussen buiten OTIF, bijv. "UB"
+# verplichte_bestanden = ""                           # kleinere vereiste set, bijv. "OrderExport2G.xlsx, Export-1.xlsx, Export.xlsx"
 
 _LOCATIE_DEFAULTS = {
     "naam": "Coatinc Groningen",
@@ -268,6 +285,91 @@ def get_poetsen_otif_actief() -> bool:
     volgen de normale OTIF-regels. Standaard uit (Groningen ongewijzigd)."""
     val = _get_locatie_setting("poetsen_otif_uitzondering", "false")
     return str(val).strip().lower() in ("true", "1", "ja", "yes", "aan")
+
+
+def _get_locatie_number(key: str, default):
+    """Lees een numerieke [locatie]-instelling; val terug op default bij ontbreken
+    of ongeldige waarde. Geeft int terug als de waarde geheel is, anders float."""
+    try:
+        cfg = st.secrets["locatie"]
+        raw = cfg.get(key, None) if hasattr(cfg, "get") else None
+    except (KeyError, FileNotFoundError):
+        raw = None
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return default
+    try:
+        f = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return int(f) if f.is_integer() else f
+
+
+def get_max_capaciteit_config() -> tuple[int, int, int, int]:
+    """(min, max, default, step) voor de dagcapaciteit-slider (ton).
+    Groningen-defaults: 50–90, start 60, stap 5. Per vestiging instelbaar via
+    [locatie]: max_capaciteit_min / _max / _default / _step."""
+    mn = int(_get_locatie_number("max_capaciteit_min", 50))
+    mx = int(_get_locatie_number("max_capaciteit_max", 90))
+    step = int(_get_locatie_number("max_capaciteit_step", 5))
+    default = int(_get_locatie_number("max_capaciteit_default", 60))
+    if mx < mn:
+        mn, mx = mx, mn
+    default = min(max(default, mn), mx)   # binnen [min, max] houden
+    return mn, mx, default, max(step, 1)
+
+
+def get_kg_traverse_defaults() -> tuple[int, int, int]:
+    """Default KG-per-traverse voor (Constructie, Maatwerk, Seriewerk).
+    Groningen-defaults 1300 / 840 / 930. Per vestiging instelbaar via [locatie]:
+    kg_traverse_constructie / _maatwerk / _seriewerk."""
+    return (
+        int(_get_locatie_number("kg_traverse_constructie", 1300)),
+        int(_get_locatie_number("kg_traverse_maatwerk", 840)),
+        int(_get_locatie_number("kg_traverse_seriewerk", 930)),
+    )
+
+
+def get_otif_uitsluiten_statussen() -> set:
+    """Statussen die volledig buiten de OTIF-berekening blijven (niet in totaal
+    en niet als te laat). Per vestiging instelbaar via [locatie]:
+    otif_uitsluiten_statussen = "UB"  (komma-gescheiden voor meerdere).
+    Standaard leeg (Groningen ongewijzigd)."""
+    raw = _get_locatie_setting("otif_uitsluiten_statussen", "")
+    if not raw:
+        return set()
+    return {s.strip() for s in str(raw).split(",") if s.strip()}
+
+
+def _split_required_optional(raw: str) -> tuple[list, list]:
+    """Pure helper: bepaal (required, optional) uit de config-string
+    'verplichte_bestanden'. Leeg → Groningen-defaults."""
+    if not raw or not str(raw).strip():
+        return list(_DEFAULT_REQUIRED_FILES), list(_BASE_OPTIONAL_FILES)
+
+    wanted = {s.strip() for s in str(raw).split(",") if s.strip()}
+    required = [f for f in _DEFAULT_REQUIRED_FILES if f in wanted]
+    if "OrderExport2G.xlsx" not in required:
+        required = ["OrderExport2G.xlsx"] + required
+    demoted = [f for f in _DEFAULT_REQUIRED_FILES if f not in required]
+    optional = demoted + list(_BASE_OPTIONAL_FILES)
+    return required, optional
+
+
+def _compute_file_lists() -> tuple[list, list]:
+    """Bepaal (REQUIRED_FILES, OPTIONAL_FILES) voor deze vestiging.
+
+    Standaard (Groningen): alle weekexports + feestdagen vereist. Per vestiging
+    kan een kleinere vereiste set gelden via [locatie]:
+        verplichte_bestanden = "OrderExport2G.xlsx, Export-1.xlsx, Export.xlsx"
+    De overige standaard-vereiste bestanden verschuiven dan naar optioneel.
+    OrderExport2G.xlsx blijft altijd vereist (harde afhankelijkheid)."""
+    return _split_required_optional(_get_locatie_setting("verplichte_bestanden", ""))
+
+
+# Definitieve, per-vestiging bepaalde bestandslijsten (door manager- en viewer-app
+# geïmporteerd). Berekend bij import; per app/vestiging vast via de secrets.
+REQUIRED_FILES, OPTIONAL_FILES = _compute_file_lists()
+
 
 _TEMP_DIR = Path(tempfile.gettempdir()) / "cap_planning_cache"
 
@@ -351,7 +453,9 @@ def validate_required_files_in_folder(folder: Path) -> bool:
     missing = [f for f in REQUIRED_FILES if not (folder / f).exists()]
     if missing:
         raise FileNotFoundError("Ontbrekende bestanden: " + ", ".join(missing))
-    validate_feestdagen_xlsx(folder / "feestdagen.xlsx")
+    # feestdagen kan per vestiging optioneel zijn; alleen valideren indien aanwezig.
+    if (folder / "feestdagen.xlsx").exists():
+        validate_feestdagen_xlsx(folder / "feestdagen.xlsx")
     return True
 
 
@@ -808,6 +912,8 @@ def load_published_data():
 
     for fname in export_files:
         fp = tmp / fname
+        if not fp.exists():
+            continue   # per vestiging optioneel; overslaan indien niet gepubliceerd
         tmp_df = pd.read_excel(fp)
         tmp_df["Bronbestand"] = fname
         tmp_df["Bron_week"] = extract_week_label(fname)
@@ -820,6 +926,12 @@ def load_published_data():
             }
         )
 
+    if not export_frames:
+        raise FileNotFoundError(
+            "Geen enkel Export-weekbestand gevonden. Minimaal één (bijv. "
+            "Export-1.xlsx of Export.xlsx) is nodig."
+        )
+
     export = pd.concat(export_frames, ignore_index=True)
 
     # Verzamel alle CgsNummers die al in de weekexports zitten
@@ -829,7 +941,12 @@ def load_published_data():
 
     # ── 2. OrderExport2G en feestdagen inladen ────────────────────────────
     order = pd.read_excel(tmp / "OrderExport2G.xlsx")
-    holiday_df = pd.read_excel(tmp / "feestdagen.xlsx")
+    feestdagen_fp = tmp / "feestdagen.xlsx"
+    if feestdagen_fp.exists():
+        holiday_df = pd.read_excel(feestdagen_fp)
+    else:
+        # feestdagen kan per vestiging optioneel zijn → lege kalender.
+        holiday_df = pd.DataFrame(columns=["Datum", "Omschrijving", "Type"])
     debtor_lookup = _load_debtor_segment_lookup(tmp)
 
     # Scheepsleidingen-klanten (24-uursservice) altijd als depot behandelen,
@@ -1391,6 +1508,7 @@ def compute_otif(
     apply_depot_shift: bool = True,
     poetsen_afgehaald_niet_ok: bool = False,
     prijscategorie_column: str = "PrijsCategorie",
+    uitsluiten_statussen: set | None = None,
 ) -> dict:
     """
     Bereken de OTIF-KPI over orders waarvan de te toetsen datum gelijk is aan
@@ -1474,6 +1592,16 @@ def compute_otif(
         mask = date_series == peil_ts
 
     subset = df.loc[mask].copy()
+
+    # Statussen die volledig buiten de OTIF-telling blijven (per vestiging),
+    # bijv. 'UB'. Exacte match op status (getrimd, hoofdletterongevoelig), zodat
+    # bijv. 'UB V Gereed' NIET wordt uitgesloten.
+    if uitsluiten_statussen and "Status" in subset.columns:
+        excl = {str(s).strip().casefold() for s in uitsluiten_statussen}
+        subset = subset[
+            ~subset["Status"].astype(str).str.strip().str.casefold().isin(excl)
+        ].copy()
+
     if subset.empty or "Status" not in subset.columns:
         result = _empty_otif_result(peildatum, date_column, label)
         result["peildatum_vorige_werkdag"] = vorige_werkdag
