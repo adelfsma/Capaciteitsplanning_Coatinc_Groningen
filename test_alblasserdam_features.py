@@ -21,6 +21,15 @@ from shared import (  # noqa: E402
     _load_scheepsleidingen_ids,
     _force_scheepsleidingen_depot,
     get_poetsen_otif_actief,
+    get_max_capaciteit_config,
+    get_kg_traverse_defaults,
+    get_otif_uitsluiten_statussen,
+    _split_required_optional,
+    _DEFAULT_REQUIRED_FILES,
+    _BASE_OPTIONAL_FILES,
+    validate_required_files_in_folder,
+    REQUIRED_FILES,
+    OPTIONAL_FILES,
     SCHEEPSLEIDINGEN_FILE,
 )
 
@@ -155,6 +164,85 @@ def test_poetsen_vlag_default_uit():
     print("✅ test_poetsen_vlag_default_uit")
 
 
+def test_otif_uitsluiten_ub():
+    """'UB' moet volledig uit de OTIF-telling vallen; 'UB V Gereed' blijft."""
+    peildag = date(2026, 7, 20)
+    ts = pd.Timestamp(peildag)
+    df = pd.DataFrame([
+        {"Bron_week": "0", "Nummer": "U1", "Leverdatum": ts, "Status": "UB"},
+        {"Bron_week": "0", "Nummer": "U2", "Leverdatum": ts, "Status": "UB V Gereed"},
+        {"Bron_week": "0", "Nummer": "U3", "Leverdatum": ts, "Status": "Productie gereed"},
+        {"Bron_week": "0", "Nummer": "U4", "Leverdatum": ts, "Status": "uitgeleverd"},
+    ])
+    # Zonder uitsluiting: 4 orders (UB telt als Nee)
+    r0 = compute_otif(df, peildatum=peildag)
+    assert r0["totaal"] == 4, f"totaal zonder uitsluiting = {r0['totaal']}"
+    assert r0["niet_gereed"] == 2, f"niet_gereed zonder uitsluiting = {r0['niet_gereed']}"  # UB + Productie gereed
+
+    # Met uitsluiting van UB: 3 orders, UB weg, UB V Gereed blijft (Ja)
+    r1 = compute_otif(df, peildatum=peildag, uitsluiten_statussen={"UB"})
+    assert r1["totaal"] == 3, f"totaal met uitsluiting = {r1['totaal']}"
+    nummers = set(r1["orders"]["Nummer"].astype(str))
+    assert "U1" not in nummers, "UB moet uitgesloten zijn"
+    assert "U2" in nummers, "UB V Gereed moet blijven"
+    # Nee: alleen Productie gereed (U3) = 1
+    assert r1["niet_gereed"] == 1, f"niet_gereed met uitsluiting = {r1['niet_gereed']}"
+    print("✅ test_otif_uitsluiten_ub")
+
+
+def test_config_defaults_groningen():
+    """Zonder [locatie]-secrets gelden de Groningse defaults."""
+    assert get_max_capaciteit_config() == (50, 90, 60, 5), get_max_capaciteit_config()
+    assert get_kg_traverse_defaults() == (1300, 840, 930), get_kg_traverse_defaults()
+    assert get_otif_uitsluiten_statussen() == set()
+    print("✅ test_config_defaults_groningen")
+
+
+def test_bestandslijst_default_groningen():
+    """Zonder config: alle 8 vereist, 3 basis-optioneel (Groningen)."""
+    req, opt = _split_required_optional("")
+    assert req == _DEFAULT_REQUIRED_FILES
+    assert opt == _BASE_OPTIONAL_FILES
+    # Zonder secrets in de testomgeving zijn de module-lijsten óók de defaults:
+    assert REQUIRED_FILES == _DEFAULT_REQUIRED_FILES
+    assert OPTIONAL_FILES == _BASE_OPTIONAL_FILES
+    print("✅ test_bestandslijst_default_groningen")
+
+
+def test_bestandslijst_cal_minimaal():
+    """CAL: alleen OrderExport2G, Export-1 en Export vereist; rest optioneel."""
+    req, opt = _split_required_optional("OrderExport2G.xlsx, Export-1.xlsx, Export.xlsx")
+    assert req == ["OrderExport2G.xlsx", "Export-1.xlsx", "Export.xlsx"], req
+    # Gedemoveerd naar optioneel + basis-optioneel:
+    for f in ["Export+1.xlsx", "Export+2.xlsx", "Export+3.xlsx", "Export+4.xlsx", "feestdagen.xlsx"]:
+        assert f in opt, f"{f} moet optioneel zijn"
+    for f in _BASE_OPTIONAL_FILES:
+        assert f in opt
+    print("✅ test_bestandslijst_cal_minimaal")
+
+
+def test_bestandslijst_orderexport_altijd_vereist():
+    """OrderExport2G blijft vereist, ook als niet in de config genoemd."""
+    req, opt = _split_required_optional("Export-1.xlsx, Export.xlsx")
+    assert "OrderExport2G.xlsx" in req
+    print("✅ test_bestandslijst_orderexport_altijd_vereist")
+
+
+def test_validatie_feestdagen_optioneel(tmp_path):
+    """Ontbrekende feestdagen mag geen fout geven zolang die niet vereist is."""
+    import pandas as pd
+    # Maak alleen de (in deze test) vereiste bestanden aan.
+    for f in REQUIRED_FILES:
+        if f == "feestdagen.xlsx":
+            # feestdagen mét geldige inhoud, want in de Groningse default is die vereist
+            pd.DataFrame({"Datum": ["1-1-2026"], "Omschrijving": ["Nieuwjaar"], "Type": ["V"]}).to_excel(tmp_path / f, index=False)
+        else:
+            pd.DataFrame({"x": [1]}).to_excel(tmp_path / f, index=False)
+    # Mag niet crashen op de aanwezige set:
+    assert validate_required_files_in_folder(tmp_path) is True
+    print("✅ test_validatie_feestdagen_optioneel")
+
+
 if __name__ == "__main__":
     # Tests met een tmp_path-fixture draaien via pytest; hier alleen de tests
     # zonder fixture voor een snelle rooktest.
@@ -165,4 +253,9 @@ if __name__ == "__main__":
     test_force_scheepsleidingen_depot()
     test_force_scheepsleidingen_depot_lege_set()
     test_poetsen_vlag_default_uit()
+    test_otif_uitsluiten_ub()
+    test_config_defaults_groningen()
+    test_bestandslijst_default_groningen()
+    test_bestandslijst_cal_minimaal()
+    test_bestandslijst_orderexport_altijd_vereist()
     print("Rooktest OK. Volledige suite: python -m pytest test_alblasserdam_features.py -q")

@@ -28,6 +28,9 @@ from shared import (
     get_locatie_naam,
     get_locatie_logo,
     get_poetsen_otif_actief,
+    get_max_capaciteit_config,
+    get_kg_traverse_defaults,
+    get_otif_uitsluiten_statussen,
 )
 
 st.set_page_config(layout="wide", page_title=get_page_title(f"Capaciteitsplanning {get_locatie_naam()}"))
@@ -591,14 +594,26 @@ if meta:
     if notes:
         st.sidebar.write(f"Toelichting: {notes}")
 
-st.title(f"Capaciteitsplanning {get_locatie_naam()}")
+if is_test_environment():
+    st.markdown(
+        f"<h1 style='margin-bottom:0'>Capaciteitsplanning {get_locatie_naam()}"
+        f"&nbsp;<span style='"
+        f"background:#dc2626;color:white;font-size:0.55em;font-weight:800;"
+        f"padding:4px 14px;border-radius:8px;vertical-align:middle;"
+        f"letter-spacing:0.08em;text-transform:uppercase'>TEST</span></h1>",
+        unsafe_allow_html=True,
+    )
+else:
+    st.title(f"Capaciteitsplanning {get_locatie_naam()}")
 st.sidebar.header("Instellingen")
-capaciteit_ton = st.sidebar.slider("Max capaciteit per dag (ton)", 50, 90, 60, 5)
+_cap_min, _cap_max, _cap_default, _cap_step = get_max_capaciteit_config()
+capaciteit_ton = st.sidebar.slider("Max capaciteit per dag (ton)", _cap_min, _cap_max, _cap_default, _cap_step)
 capaciteit_kg = capaciteit_ton * 1000
 offset = st.sidebar.selectbox("Verzinkdatum = leverdatum - X werkdagen", [1, 2, 3, 4], index=1)
-kg_per_traverse_constructie = st.sidebar.number_input("KG per traverse Constructie", min_value=100, max_value=10000, value=1300, step=50)
-kg_per_traverse_maatwerk = st.sidebar.number_input("KG per traverse Maatwerk", min_value=100, max_value=10000, value=840, step=50)
-kg_per_traverse_seriewerk = st.sidebar.number_input("KG per traverse Seriewerk", min_value=100, max_value=10000, value=930, step=50)
+_kg_constr_def, _kg_maat_def, _kg_serie_def = get_kg_traverse_defaults()
+kg_per_traverse_constructie = st.sidebar.number_input("KG per traverse Constructie", min_value=100, max_value=10000, value=_kg_constr_def, step=50)
+kg_per_traverse_maatwerk = st.sidebar.number_input("KG per traverse Maatwerk", min_value=100, max_value=10000, value=_kg_maat_def, step=50)
+kg_per_traverse_seriewerk = st.sidebar.number_input("KG per traverse Seriewerk", min_value=100, max_value=10000, value=_kg_serie_def, step=50)
 default_start = previous_workday(date.today())
 startdatum = st.sidebar.date_input("Startdatum rapport", value=default_start)
 toon_alle_regels = st.sidebar.checkbox("Toon alle regels in controletab", value=True)
@@ -685,6 +700,7 @@ otif_result = compute_otif(
     date_column_label=otif_date_label,
     holiday_dates=otif_holiday_dates,
     poetsen_afgehaald_niet_ok=get_poetsen_otif_actief(),
+    uitsluiten_statussen=get_otif_uitsluiten_statussen(),
 )
 
 tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Gebruikte gegevens", "OTIF", "Debug"])
