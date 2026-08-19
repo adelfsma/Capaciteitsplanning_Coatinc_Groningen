@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.8"
+APP_VERSION = "v2.5.9"
 
 
 def get_app_environment() -> str:
@@ -236,7 +236,7 @@ RESERVERING_WINDOW_NA   = 40   # dagen na vandaag
 # kg_traverse_constructie = 1300                      # default KG per traverse Constructie
 # kg_traverse_maatwerk = 840                          # default KG per traverse Maatwerk
 # kg_traverse_seriewerk = 930                         # default KG per traverse Seriewerk
-# otif_uitsluiten_statussen = ""                      # komma-gescheiden statussen buiten OTIF, bijv. "UB"
+# otif_uitsluiten_statussen = ""                      # komma-gescheiden EXTRA statussen buiten OTIF (UB is al altijd uitgesloten, hoeft hier niet)
 # verplichte_bestanden = ""                           # kleinere vereiste set, bijv. "OrderExport2G.xlsx, Export-1.xlsx, Export.xlsx"
 
 _LOCATIE_DEFAULTS = {
@@ -330,10 +330,11 @@ def get_kg_traverse_defaults() -> tuple[int, int, int]:
 
 
 def get_otif_uitsluiten_statussen() -> set:
-    """Statussen die volledig buiten de OTIF-berekening blijven (niet in totaal
-    en niet als te laat). Per vestiging instelbaar via [locatie]:
-    otif_uitsluiten_statussen = "UB"  (komma-gescheiden voor meerdere).
-    Standaard leeg (Groningen ongewijzigd)."""
+    """Extra statussen die volledig buiten de OTIF-berekening blijven (niet in
+    totaal en niet als te laat), bovenop UB dat al standaard altijd wordt
+    uitgesloten. Per vestiging instelbaar via [locatie]:
+    otif_uitsluiten_statussen = "Status A, Status B" (komma-gescheiden).
+    Standaard leeg."""
     raw = _get_locatie_setting("otif_uitsluiten_statussen", "")
     if not raw:
         return set()
@@ -1506,6 +1507,7 @@ def _empty_otif_result(peildatum, date_column: str, date_column_label: str) -> d
         "depot_shift_actief": False,
         "aantal_depot": 0,
         "aantal_coat_uitgesloten": 0,
+        "aantal_ub_uitgesloten": 0,
         "orders": pd.DataFrame(),
     }
 
@@ -1552,6 +1554,14 @@ def compute_otif(
       `prijscategorie_column` (default 'PrijsCategorie') de tekst 'poetsen'
       bevat, de status 'Afgehaald' als niet OK ('Nee') i.p.v. OK. Alle andere
       statussen volgen de normale OTIF-mapping.
+
+    UB-uitsluiting (altijd actief, alle vestigingen):
+    - Uitbestede orders horen niet in de OTIF van de verzinkstraat en worden
+      daarom volledig uit de telling gehaald — zowel de 'Ja'- als de
+      'Nee'-sub-status. Dit filtert op Verzinkstatus == 'UB', wat zowel
+      Status 'UB' als 'UB V Gereed' dekt (zie STATUS_MAP). Niet via config
+      in-/uit te schakelen; `uitsluiten_statussen` is voor eventuele
+      aanvullende, per-vestiging status-uitsluitingen.
 
     Coat-uitsluiting (altijd actief):
     - Poeder-coat orders horen niet in de OTIF van de verzinkstraat en worden
@@ -1605,9 +1615,23 @@ def compute_otif(
 
     subset = df.loc[mask].copy()
 
-    # Statussen die volledig buiten de OTIF-telling blijven (per vestiging),
-    # bijv. 'UB'. Exacte match op status (getrimd, hoofdletterongevoelig), zodat
-    # bijv. 'UB V Gereed' NIET wordt uitgesloten.
+    # UB (uitbesteed) hoort niet in de OTIF van de verzinkstraat en wordt
+    # daarom altijd volledig uitgesloten, in alle vestigingen — zowel de
+    # 'Ja'- als de 'Nee'-sub-status. 'UB' en 'UB V Gereed' mappen beide op
+    # Verzinkstatus == 'UB' (zie STATUS_MAP), dus dat is de betrouwbare
+    # kolom om op te filteren i.p.v. losse Status-tekstvarianten. Dit is
+    # generiek gedrag en niet via config in-/uit te schakelen.
+    aantal_ub_uitgesloten = 0
+    if "Verzinkstatus" in subset.columns:
+        is_ub = subset["Verzinkstatus"] == "UB"
+        aantal_ub_uitgesloten = int(is_ub.sum())
+        if aantal_ub_uitgesloten:
+            subset = subset.loc[~is_ub].copy()
+
+    # Overige, optioneel per vestiging te configureren status-uitsluitingen
+    # (bijv. voor toekomstige gevallen). Exacte match op raw Status
+    # (getrimd, hoofdletterongevoelig), zodat bijv. 'UB V Gereed' niet per
+    # ongeluk wordt geraakt door een uitsluiting op 'UB'.
     if uitsluiten_statussen and "Status" in subset.columns:
         excl = {str(s).strip().casefold() for s in uitsluiten_statussen}
         subset = subset[
@@ -1618,6 +1642,7 @@ def compute_otif(
         result = _empty_otif_result(peildatum, date_column, label)
         result["peildatum_vorige_werkdag"] = vorige_werkdag
         result["depot_shift_actief"] = depot_shift_actief
+        result["aantal_ub_uitgesloten"] = aantal_ub_uitgesloten
         return result
 
     subset["OTIF_status"] = subset["Status"].apply(map_otif_status)
@@ -1649,6 +1674,7 @@ def compute_otif(
         result["peildatum_vorige_werkdag"] = vorige_werkdag
         result["depot_shift_actief"] = depot_shift_actief
         result["aantal_coat_uitgesloten"] = aantal_coat_uitgesloten
+        result["aantal_ub_uitgesloten"] = aantal_ub_uitgesloten
         return result
 
     # Boolean voor duidelijkheid in de detailtabel én in de samenvatting.
@@ -1681,6 +1707,7 @@ def compute_otif(
         "depot_shift_actief": depot_shift_actief,
         "aantal_depot": aantal_depot,
         "aantal_coat_uitgesloten": aantal_coat_uitgesloten,
+        "aantal_ub_uitgesloten": aantal_ub_uitgesloten,
         "orders": subset,
     }
 

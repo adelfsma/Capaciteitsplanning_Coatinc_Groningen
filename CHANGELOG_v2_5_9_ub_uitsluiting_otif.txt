@@ -1,0 +1,26 @@
+v2.5.9 OTIF: UB altijd volledig uitsluiten, in alle vestigingen
+
+Aanleiding: UB (uitbesteed) hoort niet bij de verzinkstraat en moet dus
+nooit meetellen in de OTIF-score — noch als 'gereed' (Ja), noch als
+'te laat' (Nee). Dit gold voorheen alleen als je het per vestiging
+expliciet instelde via `otif_uitsluiten_statussen = "UB"` in secrets.
+Vanaf nu staat dit altijd aan, voor CGR én CAL, ongeacht secrets.
+
+Wijziging
+- compute_otif() filtert de subset nu eerst op Verzinkstatus == "UB"
+  (dekt zowel raw Status "UB" als "UB V Gereed", want STATUS_MAP mapt
+  beide naar Verzinkstatus "UB"). Dit gebeurt vóór de status-mapping,
+  vóór de poetsen-uitzondering en vóór de coat-uitsluiting.
+- Nieuw veld in het resultaat-dict: aantal_ub_uitgesloten.
+- `otif_uitsluiten_statussen` (secrets, per vestiging) blijft bestaan
+  voor eventuele aanvullende statussen, maar is niet meer nodig voor UB.
+- OTIF-tab caption toont, als er UB-orders zijn weggelaten, hoeveel dat
+  er waren — analoog aan de bestaande melding voor coat-orders.
+
+Validatie
+- py_compile op beide bestanden: geslaagd.
+- Smoke test (4 orders: UB, UB V Gereed, Afgehaald, Opgehangen) op
+  compute_otif() bevestigt: totaal=2 (alleen de niet-UB orders),
+  aantal_ub_uitgesloten=2, OTIF=50% (1 gereed, 1 niet gereed).
+
+manager_app.py is niet aangeraakt.
