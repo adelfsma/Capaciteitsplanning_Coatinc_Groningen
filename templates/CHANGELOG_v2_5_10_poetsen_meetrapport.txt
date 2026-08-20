@@ -1,0 +1,33 @@
+v2.5.10 OTIF: poetsen-uitzondering uitgebreid met meetrapport-regel
+
+Aanleiding: de bestaande poetsen-uitzondering (CAL, poetsen_otif_uitzondering)
+zette 'Afgehaald' terecht op 'Nee' voor poetsen-orders (Afgehaald zegt alleen
+iets over het verzinken, niet over het poetswerk). Maar de status die wél
+aangeeft dat de poetsen-order volledig klaar is — 'meetrapport' — telde tot nu
+toe nog gewoon als 'Nee' (normale mapping). Dat is nu gecorrigeerd.
+
+Nieuwe regel (alleen actief als poetsen_otif_uitzondering = true, dus alleen
+voor vestigingen die dat expliciet aanzetten — momenteel CAL):
+- PrijsCategorie bevat 'poetsen'  EN  Status = 'Afgehaald'   → OTIF = Nee
+- PrijsCategorie bevat 'poetsen'  EN  Status = 'meetrapport' → OTIF = Ja
+- PrijsCategorie bevat geen 'poetsen' → ongewijzigd, normale mapping
+  ('Afgehaald' = Ja, 'meetrapport' = Nee)
+
+Wijziging
+- shared.py
+  - APP_VERSION → v2.5.10
+  - compute_otif(): poetsen-blok uitgebreid met een tweede regel voor
+    'meetrapport' (naast de bestaande 'Afgehaald'-regel), beide alleen
+    toegepast op orders waarvan PrijsCategorie 'poetsen' bevat.
+  - Docstrings van compute_otif() en get_poetsen_otif_actief() bijgewerkt.
+  - Voorbeeldcommentaar bij [locatie]-secrets bijgewerkt.
+- viewer_app.py: geen wijziging nodig.
+
+Validatie
+- py_compile: geslaagd.
+- Smoke test met 4 orders (poetsen×afgehaald, poetsen×meetrapport,
+  niet-poetsen×afgehaald, niet-poetsen×meetrapport) bevestigt: Nee / Ja / Ja
+  / Nee — exact zoals gevraagd. Met poetsen_otif_uitzondering = false (CGR-
+  default) blijft alles gewoon de normale mapping volgen (Ja / Nee / Ja / Nee).
+
+manager_app.py is niet aangeraakt.
