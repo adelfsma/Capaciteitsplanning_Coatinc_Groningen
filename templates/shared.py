@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.7"
+APP_VERSION = "v2.5.10"
 
 
 def get_app_environment() -> str:
@@ -83,6 +83,7 @@ STATUS_MAP = {
     "coat gereed": "Verzinkt",
     "Gereed": "Verzinkt",
     "Nabewerking nog uitvoeren": "Verzinkt",
+    "Ontzinkt": "Verzinkt",                 # ontzinkt telt niet als 'nog te verzinken'
     # UB (uitbesteed)
     "UB": "UB",
     "UB V Gereed": "UB",
@@ -91,7 +92,6 @@ STATUS_MAP = {
     "PC Opgehangen": "Niet verzinkt",       # zelfde als Opgehangen
     "Voorbewerking uitvoeren": "Niet verzinkt",
     "Productie gereed": "Niet verzinkt",
-    "Ontzinkt": "Niet verzinkt",
     "Gereserveerd*": "Niet verzinkt",       # reserveringen meenemen in planning
     "Geblokkeerd": "Niet verzinkt",         # geblokkeerd maar nog niet verzinkt
     # Overig
@@ -168,7 +168,11 @@ ORIGINELE_LEVERDATUM_CANDIDATES = [
 
 NL_DAY_ABBR = {0: "ma", 1: "di", 2: "wo", 3: "do", 4: "vr", 5: "za", 6: "zo"}
 
-REQUIRED_FILES = [
+# Standaard (Groningen) vereiste bestanden. Per vestiging kan een kleinere
+# vereiste set gelden (zie _compute_file_lists); OrderExport2G.xlsx is altijd
+# vereist. De uiteindelijke REQUIRED_FILES/OPTIONAL_FILES worden lager in dit
+# bestand berekend, zodra de locatie-config beschikbaar is.
+_DEFAULT_REQUIRED_FILES = [
     "OrderExport2G.xlsx",
     "Export-1.xlsx",
     "Export.xlsx",
@@ -187,12 +191,17 @@ DEBTOR_EXPORT_FILE = "debtor-export.xlsx"
 # worden deze klanten (op klantnummer) altijd als 'Aanleveren depot = 1'
 # behandeld. Optioneel en per vestiging: ontbreekt het, dan gebeurt er niets.
 SCHEEPSLEIDINGEN_FILE = "scheepsleidingen.xlsx"
-OPTIONAL_FILES = ["Export_CGS.xlsx", DEBTOR_EXPORT_FILE, SCHEEPSLEIDINGEN_FILE]
+_BASE_OPTIONAL_FILES = ["Export_CGS.xlsx", DEBTOR_EXPORT_FILE, SCHEEPSLEIDINGEN_FILE]
 
 OPTIONAL_FILE_LABELS = {
     "Export_CGS.xlsx": "Upload Export_CGS.xlsx (optioneel – CGS verzinkplanning)",
     DEBTOR_EXPORT_FILE: "Upload debtor-export.xlsx (optioneel – segment/type materiaal per klant)",
     SCHEEPSLEIDINGEN_FILE: "Upload scheepsleidingen.xlsx (optioneel – klanten met 24-uursservice; worden als depot behandeld)",
+    "feestdagen.xlsx": "Upload feestdagen.xlsx (optioneel voor deze vestiging – feestdagenkalender)",
+    "Export+1.xlsx": "Upload Export+1.xlsx (optioneel voor deze vestiging)",
+    "Export+2.xlsx": "Upload Export+2.xlsx (optioneel voor deze vestiging)",
+    "Export+3.xlsx": "Upload Export+3.xlsx (optioneel voor deze vestiging)",
+    "Export+4.xlsx": "Upload Export+4.xlsx (optioneel voor deze vestiging)",
 }
 
 MATERIAALTYPE_ORDER = ["Constructie", "Maatwerk", "Seriewerk", "Overig / onbekend"]
@@ -220,7 +229,15 @@ RESERVERING_WINDOW_NA   = 40   # dagen na vandaag
 # logo                = "logo_coatinc_groningen.png"  # bestand in repo-root
 # reservering_locatie = "Coatinc Groningen"           # exacte match op 'Locatie V'
 # beheer_wachtwoord   = "coatinc2026"                 # wachtwoord beheeromgeving
-# poetsen_otif_uitzondering = false                   # true = 'Afgehaald' telt niet OK voor poetsen-orders
+# poetsen_otif_uitzondering = false                   # true = voor poetsen-orders: Afgehaald=Nee, meetrapport=Ja
+# max_capaciteit_min = 50                             # dagcapaciteit-slider (ton): minimum
+# max_capaciteit_max = 90                             # dagcapaciteit-slider (ton): maximum
+# max_capaciteit_default = 60                         # dagcapaciteit-slider (ton): startwaarde
+# kg_traverse_constructie = 1300                      # default KG per traverse Constructie
+# kg_traverse_maatwerk = 840                          # default KG per traverse Maatwerk
+# kg_traverse_seriewerk = 930                         # default KG per traverse Seriewerk
+# otif_uitsluiten_statussen = ""                      # komma-gescheiden EXTRA statussen buiten OTIF (UB is al altijd uitgesloten, hoeft hier niet)
+# verplichte_bestanden = ""                           # kleinere vereiste set, bijv. "OrderExport2G.xlsx, Export-1.xlsx, Export.xlsx"
 
 _LOCATIE_DEFAULTS = {
     "naam": "Coatinc Groningen",
@@ -263,11 +280,98 @@ def get_reservering_locatie() -> str:
 def get_poetsen_otif_actief() -> bool:
     """True als de poetsen-uitzondering op OTIF actief is voor deze vestiging.
     Zet in secrets: [locatie] poetsen_otif_uitzondering = true.
-    Effect: voor orders waarvan PrijsCategorie 'poetsen' bevat, telt de status
-    'Afgehaald' op de peildatum als niet OK (i.p.v. OK). Overige statussen
-    volgen de normale OTIF-regels. Standaard uit (Groningen ongewijzigd)."""
+    Effect: voor orders waarvan PrijsCategorie 'poetsen' bevat, geldt een
+    omgekeerde OTIF-regel: 'Afgehaald' telt als niet OK ('Nee'), 'meetrapport'
+    telt als wél OK ('Ja'). Voor orders zonder 'poetsen' verandert er niets.
+    Standaard uit (Groningen ongewijzigd)."""
     val = _get_locatie_setting("poetsen_otif_uitzondering", "false")
     return str(val).strip().lower() in ("true", "1", "ja", "yes", "aan")
+
+
+def _get_locatie_number(key: str, default):
+    """Lees een numerieke [locatie]-instelling; val terug op default bij ontbreken
+    of ongeldige waarde. Geeft int terug als de waarde geheel is, anders float."""
+    try:
+        cfg = st.secrets["locatie"]
+        raw = cfg.get(key, None) if hasattr(cfg, "get") else None
+    except (KeyError, FileNotFoundError):
+        raw = None
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return default
+    try:
+        f = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return int(f) if f.is_integer() else f
+
+
+def get_max_capaciteit_config() -> tuple[int, int, int, int]:
+    """(min, max, default, step) voor de dagcapaciteit-slider (ton).
+    Groningen-defaults: 50–90, start 60, stap 5. Per vestiging instelbaar via
+    [locatie]: max_capaciteit_min / _max / _default / _step."""
+    mn = int(_get_locatie_number("max_capaciteit_min", 50))
+    mx = int(_get_locatie_number("max_capaciteit_max", 90))
+    step = int(_get_locatie_number("max_capaciteit_step", 5))
+    default = int(_get_locatie_number("max_capaciteit_default", 60))
+    if mx < mn:
+        mn, mx = mx, mn
+    default = min(max(default, mn), mx)   # binnen [min, max] houden
+    return mn, mx, default, max(step, 1)
+
+
+def get_kg_traverse_defaults() -> tuple[int, int, int]:
+    """Default KG-per-traverse voor (Constructie, Maatwerk, Seriewerk).
+    Groningen-defaults 1300 / 840 / 930. Per vestiging instelbaar via [locatie]:
+    kg_traverse_constructie / _maatwerk / _seriewerk."""
+    return (
+        int(_get_locatie_number("kg_traverse_constructie", 1300)),
+        int(_get_locatie_number("kg_traverse_maatwerk", 840)),
+        int(_get_locatie_number("kg_traverse_seriewerk", 930)),
+    )
+
+
+def get_otif_uitsluiten_statussen() -> set:
+    """Extra statussen die volledig buiten de OTIF-berekening blijven (niet in
+    totaal en niet als te laat), bovenop UB dat al standaard altijd wordt
+    uitgesloten. Per vestiging instelbaar via [locatie]:
+    otif_uitsluiten_statussen = "Status A, Status B" (komma-gescheiden).
+    Standaard leeg."""
+    raw = _get_locatie_setting("otif_uitsluiten_statussen", "")
+    if not raw:
+        return set()
+    return {s.strip() for s in str(raw).split(",") if s.strip()}
+
+
+def _split_required_optional(raw: str) -> tuple[list, list]:
+    """Pure helper: bepaal (required, optional) uit de config-string
+    'verplichte_bestanden'. Leeg → Groningen-defaults."""
+    if not raw or not str(raw).strip():
+        return list(_DEFAULT_REQUIRED_FILES), list(_BASE_OPTIONAL_FILES)
+
+    wanted = {s.strip() for s in str(raw).split(",") if s.strip()}
+    required = [f for f in _DEFAULT_REQUIRED_FILES if f in wanted]
+    if "OrderExport2G.xlsx" not in required:
+        required = ["OrderExport2G.xlsx"] + required
+    demoted = [f for f in _DEFAULT_REQUIRED_FILES if f not in required]
+    optional = demoted + list(_BASE_OPTIONAL_FILES)
+    return required, optional
+
+
+def _compute_file_lists() -> tuple[list, list]:
+    """Bepaal (REQUIRED_FILES, OPTIONAL_FILES) voor deze vestiging.
+
+    Standaard (Groningen): alle weekexports + feestdagen vereist. Per vestiging
+    kan een kleinere vereiste set gelden via [locatie]:
+        verplichte_bestanden = "OrderExport2G.xlsx, Export-1.xlsx, Export.xlsx"
+    De overige standaard-vereiste bestanden verschuiven dan naar optioneel.
+    OrderExport2G.xlsx blijft altijd vereist (harde afhankelijkheid)."""
+    return _split_required_optional(_get_locatie_setting("verplichte_bestanden", ""))
+
+
+# Definitieve, per-vestiging bepaalde bestandslijsten (door manager- en viewer-app
+# geïmporteerd). Berekend bij import; per app/vestiging vast via de secrets.
+REQUIRED_FILES, OPTIONAL_FILES = _compute_file_lists()
+
 
 _TEMP_DIR = Path(tempfile.gettempdir()) / "cap_planning_cache"
 
@@ -351,7 +455,9 @@ def validate_required_files_in_folder(folder: Path) -> bool:
     missing = [f for f in REQUIRED_FILES if not (folder / f).exists()]
     if missing:
         raise FileNotFoundError("Ontbrekende bestanden: " + ", ".join(missing))
-    validate_feestdagen_xlsx(folder / "feestdagen.xlsx")
+    # feestdagen kan per vestiging optioneel zijn; alleen valideren indien aanwezig.
+    if (folder / "feestdagen.xlsx").exists():
+        validate_feestdagen_xlsx(folder / "feestdagen.xlsx")
     return True
 
 
@@ -808,6 +914,8 @@ def load_published_data():
 
     for fname in export_files:
         fp = tmp / fname
+        if not fp.exists():
+            continue   # per vestiging optioneel; overslaan indien niet gepubliceerd
         tmp_df = pd.read_excel(fp)
         tmp_df["Bronbestand"] = fname
         tmp_df["Bron_week"] = extract_week_label(fname)
@@ -820,6 +928,12 @@ def load_published_data():
             }
         )
 
+    if not export_frames:
+        raise FileNotFoundError(
+            "Geen enkel Export-weekbestand gevonden. Minimaal één (bijv. "
+            "Export-1.xlsx of Export.xlsx) is nodig."
+        )
+
     export = pd.concat(export_frames, ignore_index=True)
 
     # Verzamel alle CgsNummers die al in de weekexports zitten
@@ -829,7 +943,12 @@ def load_published_data():
 
     # ── 2. OrderExport2G en feestdagen inladen ────────────────────────────
     order = pd.read_excel(tmp / "OrderExport2G.xlsx")
-    holiday_df = pd.read_excel(tmp / "feestdagen.xlsx")
+    feestdagen_fp = tmp / "feestdagen.xlsx"
+    if feestdagen_fp.exists():
+        holiday_df = pd.read_excel(feestdagen_fp)
+    else:
+        # feestdagen kan per vestiging optioneel zijn → lege kalender.
+        holiday_df = pd.DataFrame(columns=["Datum", "Omschrijving", "Type"])
     debtor_lookup = _load_debtor_segment_lookup(tmp)
 
     # Scheepsleidingen-klanten (24-uursservice) altijd als depot behandelen,
@@ -1173,6 +1292,18 @@ def build_dashboard_data(
     df.loc[mask_niet_verzinkt &  mask_binnen_horizon, "Meegeteld_in_planning"] = "Ja"
     df.loc[mask_niet_verzinkt &  mask_binnen_horizon, "Reden_uitsluiting"]     = ""
 
+    # Coat-orders horen niet in de verzinkstraat-capaciteitsplanning en worden
+    # daarom altijd uitgesloten, ongeacht status/horizon. Twee patronen
+    # (case-insensitief), zelfde classificatie als bij de OTIF-KPI:
+    #   1) Coat-alleen: '<cijfers>C<cijfers>' zonder V ervoor (202616873C1)
+    #   2) Coat-deel van combi-order: eindigt op '-C' (202615352VC1-C)
+    # Het verzink-deel van combi-orders (202615352VC1-V) blijft wél meetellen.
+    # Geldt voor alle vestigingen (CGR en CAL); geen locatie-specifieke flag.
+    if "Nummer" in df.columns:
+        mask_coat_order = df["Nummer"].apply(is_otif_excluded_coat_order)
+        df.loc[mask_coat_order, "Meegeteld_in_planning"] = "Nee"
+        df.loc[mask_coat_order, "Reden_uitsluiting"]     = "Coat-order"
+
     df_plan = df[df["Meegeteld_in_planning"] == "Ja"].copy()
 
     # Uitsplitsing definitief vs. reservering voor transparantie in dashboard
@@ -1377,6 +1508,7 @@ def _empty_otif_result(peildatum, date_column: str, date_column_label: str) -> d
         "depot_shift_actief": False,
         "aantal_depot": 0,
         "aantal_coat_uitgesloten": 0,
+        "aantal_ub_uitgesloten": 0,
         "orders": pd.DataFrame(),
     }
 
@@ -1391,6 +1523,7 @@ def compute_otif(
     apply_depot_shift: bool = True,
     poetsen_afgehaald_niet_ok: bool = False,
     prijscategorie_column: str = "PrijsCategorie",
+    uitsluiten_statussen: set | None = None,
 ) -> dict:
     """
     Bereken de OTIF-KPI over orders waarvan de te toetsen datum gelijk is aan
@@ -1418,10 +1551,21 @@ def compute_otif(
       terug op de oorspronkelijke datum-vergelijking.
 
     Poetsen-uitzondering (per vestiging, standaard uit):
-    - Met `poetsen_afgehaald_niet_ok=True` telt voor orders waarvan de kolom
+    - Met `poetsen_afgehaald_niet_ok=True` geldt voor orders waarvan de kolom
       `prijscategorie_column` (default 'PrijsCategorie') de tekst 'poetsen'
-      bevat, de status 'Afgehaald' als niet OK ('Nee') i.p.v. OK. Alle andere
-      statussen volgen de normale OTIF-mapping.
+      bevat een omgekeerde regel t.o.v. de normale OTIF-mapping:
+        * Status 'Afgehaald'   → Nee (verzinken klaar zegt niets over poetsen)
+        * Status 'meetrapport' → Ja  (dit ís het signaal dat poetsen áfrondde)
+      Voor orders zónder 'poetsen' in PrijsCategorie blijft de normale mapping
+      gelden ('Afgehaald' → Ja, 'meetrapport' → Nee).
+
+    UB-uitsluiting (altijd actief, alle vestigingen):
+    - Uitbestede orders horen niet in de OTIF van de verzinkstraat en worden
+      daarom volledig uit de telling gehaald — zowel de 'Ja'- als de
+      'Nee'-sub-status. Dit filtert op Verzinkstatus == 'UB', wat zowel
+      Status 'UB' als 'UB V Gereed' dekt (zie STATUS_MAP). Niet via config
+      in-/uit te schakelen; `uitsluiten_statussen` is voor eventuele
+      aanvullende, per-vestiging status-uitsluitingen.
 
     Coat-uitsluiting (altijd actief):
     - Poeder-coat orders horen niet in de OTIF van de verzinkstraat en worden
@@ -1474,23 +1618,58 @@ def compute_otif(
         mask = date_series == peil_ts
 
     subset = df.loc[mask].copy()
+
+    # UB (uitbesteed) hoort niet in de OTIF van de verzinkstraat en wordt
+    # daarom altijd volledig uitgesloten, in alle vestigingen — zowel de
+    # 'Ja'- als de 'Nee'-sub-status. 'UB' en 'UB V Gereed' mappen beide op
+    # Verzinkstatus == 'UB' (zie STATUS_MAP), dus dat is de betrouwbare
+    # kolom om op te filteren i.p.v. losse Status-tekstvarianten. Dit is
+    # generiek gedrag en niet via config in-/uit te schakelen.
+    aantal_ub_uitgesloten = 0
+    if "Verzinkstatus" in subset.columns:
+        is_ub = subset["Verzinkstatus"] == "UB"
+        aantal_ub_uitgesloten = int(is_ub.sum())
+        if aantal_ub_uitgesloten:
+            subset = subset.loc[~is_ub].copy()
+
+    # Overige, optioneel per vestiging te configureren status-uitsluitingen
+    # (bijv. voor toekomstige gevallen). Exacte match op raw Status
+    # (getrimd, hoofdletterongevoelig), zodat bijv. 'UB V Gereed' niet per
+    # ongeluk wordt geraakt door een uitsluiting op 'UB'.
+    if uitsluiten_statussen and "Status" in subset.columns:
+        excl = {str(s).strip().casefold() for s in uitsluiten_statussen}
+        subset = subset[
+            ~subset["Status"].astype(str).str.strip().str.casefold().isin(excl)
+        ].copy()
+
     if subset.empty or "Status" not in subset.columns:
         result = _empty_otif_result(peildatum, date_column, label)
         result["peildatum_vorige_werkdag"] = vorige_werkdag
         result["depot_shift_actief"] = depot_shift_actief
+        result["aantal_ub_uitgesloten"] = aantal_ub_uitgesloten
         return result
 
     subset["OTIF_status"] = subset["Status"].apply(map_otif_status)
 
     # Poetsen-uitzondering (per vestiging): voor orders waarvan PrijsCategorie
-    # 'poetsen' bevat, telt de status 'Afgehaald' op de peildatum als niet OK
-    # ('Nee') in plaats van OK. Overige statussen volgen de normale regels.
+    # 'poetsen' bevat, is 'Afgehaald' geen betrouwbaar 'klaar'-signaal (dat zegt
+    # alleen iets over het verzinken, niet over het poetswerk) en is
+    # 'meetrapport' júist wél het signaal dat de order (incl. poetsen) is
+    # afgerond. Voor deze poetsen-orders geldt dus omgekeerd t.o.v. de normale
+    # mapping:
+    #   - Status 'Afgehaald'   → Nee (i.p.v. de normale 'Ja')
+    #   - Status 'meetrapport' → Ja  (i.p.v. de normale 'Nee')
+    # Voor orders zonder 'poetsen' in PrijsCategorie verandert er niets:
+    # 'Afgehaald' blijft Ja, 'meetrapport' blijft Nee (normale mapping).
     if poetsen_afgehaald_niet_ok and prijscategorie_column in subset.columns:
         is_poetsen = (
             subset[prijscategorie_column].astype(str).str.contains("poetsen", case=False, na=False)
         )
-        is_afgehaald = subset["Status"].astype(str).str.strip().str.casefold() == "afgehaald"
-        subset.loc[is_poetsen & is_afgehaald, "OTIF_status"] = "Nee"
+        status_key = subset["Status"].astype(str).str.strip().str.casefold()
+        is_afgehaald = status_key == "afgehaald"
+        is_meetrapport = status_key == "meetrapport"
+        subset.loc[is_poetsen & is_afgehaald,   "OTIF_status"] = "Nee"
+        subset.loc[is_poetsen & is_meetrapport, "OTIF_status"] = "Ja"
 
     # Sluit poeder-coat orders uit; deze horen niet in de OTIF van de
     # verzinkstraat. Filteren gebeurt NA de datum/depot-mask en NA de
@@ -1509,6 +1688,7 @@ def compute_otif(
         result["peildatum_vorige_werkdag"] = vorige_werkdag
         result["depot_shift_actief"] = depot_shift_actief
         result["aantal_coat_uitgesloten"] = aantal_coat_uitgesloten
+        result["aantal_ub_uitgesloten"] = aantal_ub_uitgesloten
         return result
 
     # Boolean voor duidelijkheid in de detailtabel én in de samenvatting.
@@ -1541,6 +1721,7 @@ def compute_otif(
         "depot_shift_actief": depot_shift_actief,
         "aantal_depot": aantal_depot,
         "aantal_coat_uitgesloten": aantal_coat_uitgesloten,
+        "aantal_ub_uitgesloten": aantal_ub_uitgesloten,
         "orders": subset,
     }
 

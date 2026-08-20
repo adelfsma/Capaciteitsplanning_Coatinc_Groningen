@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.9"
+APP_VERSION = "v2.5.11"
 
 
 def get_app_environment() -> str:
@@ -229,7 +229,7 @@ RESERVERING_WINDOW_NA   = 40   # dagen na vandaag
 # logo                = "logo_coatinc_groningen.png"  # bestand in repo-root
 # reservering_locatie = "Coatinc Groningen"           # exacte match op 'Locatie V'
 # beheer_wachtwoord   = "coatinc2026"                 # wachtwoord beheeromgeving
-# poetsen_otif_uitzondering = false                   # true = 'Afgehaald' telt niet OK voor poetsen-orders
+# poetsen_otif_uitzondering = false                   # true = poetsen-orders: Afgehaald=Nee; niet-poetsen: meetrapport=Ja
 # max_capaciteit_min = 50                             # dagcapaciteit-slider (ton): minimum
 # max_capaciteit_max = 90                             # dagcapaciteit-slider (ton): maximum
 # max_capaciteit_default = 60                         # dagcapaciteit-slider (ton): startwaarde
@@ -280,9 +280,11 @@ def get_reservering_locatie() -> str:
 def get_poetsen_otif_actief() -> bool:
     """True als de poetsen-uitzondering op OTIF actief is voor deze vestiging.
     Zet in secrets: [locatie] poetsen_otif_uitzondering = true.
-    Effect: voor orders waarvan PrijsCategorie 'poetsen' bevat, telt de status
-    'Afgehaald' op de peildatum als niet OK (i.p.v. OK). Overige statussen
-    volgen de normale OTIF-regels. Standaard uit (Groningen ongewijzigd)."""
+    Effect: voor orders waarvan PrijsCategorie 'poetsen' bevat, telt status
+    'Afgehaald' als niet OK ('Nee'); 'meetrapport' volgt daar de normale
+    mapping (Nee). Voor orders ZONDER 'poetsen' geldt het omgekeerde: daar
+    telt 'meetrapport' als wél OK ('Ja'). Standaard uit (Groningen
+    ongewijzigd)."""
     val = _get_locatie_setting("poetsen_otif_uitzondering", "false")
     return str(val).strip().lower() in ("true", "1", "ja", "yes", "aan")
 
@@ -1550,10 +1552,14 @@ def compute_otif(
       terug op de oorspronkelijke datum-vergelijking.
 
     Poetsen-uitzondering (per vestiging, standaard uit):
-    - Met `poetsen_afgehaald_niet_ok=True` telt voor orders waarvan de kolom
+    - Met `poetsen_afgehaald_niet_ok=True` geldt voor orders waarvan de kolom
       `prijscategorie_column` (default 'PrijsCategorie') de tekst 'poetsen'
-      bevat, de status 'Afgehaald' als niet OK ('Nee') i.p.v. OK. Alle andere
-      statussen volgen de normale OTIF-mapping.
+      bevat: status 'Afgehaald' → Nee (i.p.v. de normale 'Ja'), want dat zegt
+      alleen iets over het verzinken, niet over het poetswerk. Status
+      'meetrapport' volgt voor deze orders gewoon de normale mapping (Nee).
+    - Voor orders ZONDER 'poetsen' in PrijsCategorie geldt de omgekeerde
+      uitzondering op 'meetrapport': daar telt die status als Ja (i.p.v. de
+      normale 'Nee'). 'Afgehaald' blijft voor deze orders gewoon Ja.
 
     UB-uitsluiting (altijd actief, alle vestigingen):
     - Uitbestede orders horen niet in de OTIF van de verzinkstraat en worden
@@ -1648,14 +1654,25 @@ def compute_otif(
     subset["OTIF_status"] = subset["Status"].apply(map_otif_status)
 
     # Poetsen-uitzondering (per vestiging): voor orders waarvan PrijsCategorie
-    # 'poetsen' bevat, telt de status 'Afgehaald' op de peildatum als niet OK
-    # ('Nee') in plaats van OK. Overige statussen volgen de normale regels.
+    # 'poetsen' bevat, is 'Afgehaald' geen betrouwbaar 'klaar'-signaal (dat zegt
+    # alleen iets over het verzinken, niet over het poetswerk), dus telt die
+    # status voor deze orders als 'Nee' i.p.v. de normale 'Ja'.
+    # 'meetrapport' volgt hier de normale mapping ('Nee') en heeft dus geen
+    # aparte regel nodig.
+    # Voor orders ZONDER 'poetsen' in PrijsCategorie geldt juist een
+    # uitzondering op 'meetrapport': daar betekent deze status wél dat de
+    # order klaar is, dus telt 'meetrapport' voor niet-poetsen orders als
+    # 'Ja' i.p.v. de normale 'Nee'. 'Afgehaald' blijft voor niet-poetsen
+    # orders gewoon 'Ja' (normale mapping).
     if poetsen_afgehaald_niet_ok and prijscategorie_column in subset.columns:
         is_poetsen = (
             subset[prijscategorie_column].astype(str).str.contains("poetsen", case=False, na=False)
         )
-        is_afgehaald = subset["Status"].astype(str).str.strip().str.casefold() == "afgehaald"
-        subset.loc[is_poetsen & is_afgehaald, "OTIF_status"] = "Nee"
+        status_key = subset["Status"].astype(str).str.strip().str.casefold()
+        is_afgehaald = status_key == "afgehaald"
+        is_meetrapport = status_key == "meetrapport"
+        subset.loc[is_poetsen & is_afgehaald,    "OTIF_status"] = "Nee"
+        subset.loc[~is_poetsen & is_meetrapport, "OTIF_status"] = "Ja"
 
     # Sluit poeder-coat orders uit; deze horen niet in de OTIF van de
     # verzinkstraat. Filteren gebeurt NA de datum/depot-mask en NA de
