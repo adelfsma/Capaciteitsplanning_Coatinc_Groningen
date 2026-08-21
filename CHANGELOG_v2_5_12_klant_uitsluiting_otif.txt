@@ -1,0 +1,47 @@
+v2.5.12 OTIF: klant-uitsluiting per vestiging (Kubo Greenhouse Projects
+B.V. voor CAL)
+
+Aanleiding: klant "Kubo Greenhouse Projects B.V." mag voor CAL volledig
+buiten de OTIF-berekening blijven — niet in het totaal en niet als 'te
+laat'. Geïmplementeerd als nieuwe, per-vestiging configureerbare optie
+naar analogie van de bestaande otif_uitsluiten_statussen.
+
+Secrets (CAL)
+    [locatie]
+    otif_uitsluiten_klanten = "Kubo Greenhouse Projects B.V."
+
+Meerdere klanten kunnen komma-gescheiden worden opgegeven. Matching is
+getrimd en hoofdletterongevoelig op de kolom Klantnaam. Standaard leeg,
+dus CGR (en elke andere vestiging zonder deze instelling) is niet
+geraakt.
+
+Wijziging
+- shared.py
+  - APP_VERSION → v2.5.12
+  - Nieuwe functie get_otif_uitsluiten_klanten() (analoog aan
+    get_otif_uitsluiten_statussen()).
+  - compute_otif(): nieuwe parameter uitsluiten_klanten: set | None.
+    Filtert na de bestaande UB- en status-uitsluiting, vóór de
+    status-mapping, op Klantnaam.
+  - Nieuw veld in het resultaat-dict: aantal_klant_uitgesloten (ook
+    toegevoegd aan _empty_otif_result en de twee vroege lege-subset
+    returns).
+  - Docstrings en het voorbeeldcommentaar bij [locatie]-secrets
+    bijgewerkt.
+- viewer_app.py
+  - get_otif_uitsluiten_klanten geïmporteerd en doorgegeven aan de
+    compute_otif-aanroep.
+  - OTIF-tab caption toont voortaan, indien van toepassing, hoeveel
+    orders van uitgesloten klanten zijn weggelaten (analoog aan de
+    bestaande UB-melding).
+
+Validatie
+- py_compile op beide bestanden: geslaagd.
+- Smoke test met 4 orders (2x Kubo Greenhouse Projects B.V. — één exact,
+  één met afwijkende hoofdletters/spaties — en 2x een normale klant):
+  beide Kubo-orders correct uitgesloten (aantal_klant_uitgesloten = 2),
+  totaal = 2, normale klant blijft gewoon meetellen (Ja/Nee volgens
+  status). Zonder uitsluiten_klanten (CGR-default) blijven alle 4 orders
+  meetellen.
+
+manager_app.py is niet aangeraakt.

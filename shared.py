@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.11"
+APP_VERSION = "v2.5.12"
 
 
 def get_app_environment() -> str:
@@ -237,6 +237,7 @@ RESERVERING_WINDOW_NA   = 40   # dagen na vandaag
 # kg_traverse_maatwerk = 840                          # default KG per traverse Maatwerk
 # kg_traverse_seriewerk = 930                         # default KG per traverse Seriewerk
 # otif_uitsluiten_statussen = ""                      # komma-gescheiden EXTRA statussen buiten OTIF (UB is al altijd uitgesloten, hoeft hier niet)
+# otif_uitsluiten_klanten = ""                        # komma-gescheiden klantnamen (Klantnaam) volledig buiten OTIF, bijv. "Kubo Greenhouse Projects B.V."
 # verplichte_bestanden = ""                           # kleinere vereiste set, bijv. "OrderExport2G.xlsx, Export-1.xlsx, Export.xlsx"
 
 _LOCATIE_DEFAULTS = {
@@ -338,6 +339,18 @@ def get_otif_uitsluiten_statussen() -> set:
     otif_uitsluiten_statussen = "Status A, Status B" (komma-gescheiden).
     Standaard leeg."""
     raw = _get_locatie_setting("otif_uitsluiten_statussen", "")
+    if not raw:
+        return set()
+    return {s.strip() for s in str(raw).split(",") if s.strip()}
+
+
+def get_otif_uitsluiten_klanten() -> set:
+    """Klanten (op Klantnaam) die volledig buiten de OTIF-berekening blijven
+    (niet in totaal en niet als te laat), voor deze vestiging. Per vestiging
+    instelbaar via [locatie]:
+    otif_uitsluiten_klanten = "Klant A, Klant B" (komma-gescheiden).
+    Standaard leeg."""
+    raw = _get_locatie_setting("otif_uitsluiten_klanten", "")
     if not raw:
         return set()
     return {s.strip() for s in str(raw).split(",") if s.strip()}
@@ -1510,6 +1523,7 @@ def _empty_otif_result(peildatum, date_column: str, date_column_label: str) -> d
         "aantal_depot": 0,
         "aantal_coat_uitgesloten": 0,
         "aantal_ub_uitgesloten": 0,
+        "aantal_klant_uitgesloten": 0,
         "orders": pd.DataFrame(),
     }
 
@@ -1525,6 +1539,7 @@ def compute_otif(
     poetsen_afgehaald_niet_ok: bool = False,
     prijscategorie_column: str = "PrijsCategorie",
     uitsluiten_statussen: set | None = None,
+    uitsluiten_klanten: set | None = None,
 ) -> dict:
     """
     Bereken de OTIF-KPI over orders waarvan de te toetsen datum gelijk is aan
@@ -1568,6 +1583,12 @@ def compute_otif(
       Status 'UB' als 'UB V Gereed' dekt (zie STATUS_MAP). Niet via config
       in-/uit te schakelen; `uitsluiten_statussen` is voor eventuele
       aanvullende, per-vestiging status-uitsluitingen.
+
+    Klant-uitsluiting (per vestiging, optioneel):
+    - `uitsluiten_klanten` bevat klantnamen (matched op de kolom
+      'Klantnaam', getrimd, hoofdletterongevoelig) waarvan orders volledig
+      buiten de OTIF-telling blijven, net als bij UB. Wordt gevuld vanuit
+      [locatie] otif_uitsluiten_klanten in secrets.
 
     Coat-uitsluiting (altijd actief):
     - Poeder-coat orders horen niet in de OTIF van de verzinkstraat en worden
@@ -1644,11 +1665,26 @@ def compute_otif(
             ~subset["Status"].astype(str).str.strip().str.casefold().isin(excl)
         ].copy()
 
+    # Optioneel per vestiging te configureren klant-uitsluitingen: orders van
+    # deze klanten (op Klantnaam) tellen helemaal niet mee in de OTIF, noch
+    # in het totaal noch als 'te laat'. Exacte match, getrimd en
+    # hoofdletterongevoelig.
+    aantal_klant_uitgesloten = 0
+    if uitsluiten_klanten and "Klantnaam" in subset.columns:
+        excl_klanten = {str(k).strip().casefold() for k in uitsluiten_klanten}
+        is_uitgesloten_klant = (
+            subset["Klantnaam"].astype(str).str.strip().str.casefold().isin(excl_klanten)
+        )
+        aantal_klant_uitgesloten = int(is_uitgesloten_klant.sum())
+        if aantal_klant_uitgesloten:
+            subset = subset.loc[~is_uitgesloten_klant].copy()
+
     if subset.empty or "Status" not in subset.columns:
         result = _empty_otif_result(peildatum, date_column, label)
         result["peildatum_vorige_werkdag"] = vorige_werkdag
         result["depot_shift_actief"] = depot_shift_actief
         result["aantal_ub_uitgesloten"] = aantal_ub_uitgesloten
+        result["aantal_klant_uitgesloten"] = aantal_klant_uitgesloten
         return result
 
     subset["OTIF_status"] = subset["Status"].apply(map_otif_status)
@@ -1692,6 +1728,7 @@ def compute_otif(
         result["depot_shift_actief"] = depot_shift_actief
         result["aantal_coat_uitgesloten"] = aantal_coat_uitgesloten
         result["aantal_ub_uitgesloten"] = aantal_ub_uitgesloten
+        result["aantal_klant_uitgesloten"] = aantal_klant_uitgesloten
         return result
 
     # Boolean voor duidelijkheid in de detailtabel én in de samenvatting.
@@ -1725,6 +1762,7 @@ def compute_otif(
         "aantal_depot": aantal_depot,
         "aantal_coat_uitgesloten": aantal_coat_uitgesloten,
         "aantal_ub_uitgesloten": aantal_ub_uitgesloten,
+        "aantal_klant_uitgesloten": aantal_klant_uitgesloten,
         "orders": subset,
     }
 

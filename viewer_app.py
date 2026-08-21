@@ -31,6 +31,7 @@ from shared import (
     get_max_capaciteit_config,
     get_kg_traverse_defaults,
     get_otif_uitsluiten_statussen,
+    get_otif_uitsluiten_klanten,
 )
 
 st.set_page_config(layout="wide", page_title=get_page_title(f"Capaciteitsplanning {get_locatie_naam()}"))
@@ -701,6 +702,7 @@ otif_result = compute_otif(
     holiday_dates=otif_holiday_dates,
     poetsen_afgehaald_niet_ok=get_poetsen_otif_actief(),
     uitsluiten_statussen=get_otif_uitsluiten_statussen(),
+    uitsluiten_klanten=get_otif_uitsluiten_klanten(),
 )
 
 tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Gebruikte gegevens", "OTIF", "Debug"])
@@ -1019,6 +1021,12 @@ with tab3:
             f"**{n_ub}** order{'s' if n_ub != 1 else ''}, ongeacht of ze als "
             f"'Ja' of 'Nee' zouden zijn geteld. UB hoort niet bij de "
             f"verzinkstraat."
+        )
+    n_klant = otif_result.get("aantal_klant_uitgesloten", 0)
+    if n_klant > 0:
+        _caption_regels.append(
+            f"Orders van uitgesloten klanten zijn uit deze OTIF weggelaten: "
+            f"**{n_klant}** order{'s' if n_klant != 1 else ''}."
         )
     n_coat = otif_result.get("aantal_coat_uitgesloten", 0)
     if n_coat > 0:
