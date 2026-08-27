@@ -84,12 +84,14 @@ STATUS_MAP = {
     "Gereed": "Verzinkt",
     "Nabewerking nog uitvoeren": "Verzinkt",
     "Ontzinkt": "Verzinkt",                 # ontzinkt telt niet als 'nog te verzinken'
+    # Opgehangen: hangt al aan het rek / staat op het punt door de bak te gaan,
+    # dus telt niet meer mee in de benodigde capaciteit.
+    "Opgehangen": "Verzinkt",
     # UB (uitbesteed)
     "UB": "UB",
     "UB V Gereed": "UB",
     # Nog te verzinken
-    "Opgehangen": "Niet verzinkt",
-    "PC Opgehangen": "Niet verzinkt",       # zelfde als Opgehangen
+    "PC Opgehangen": "Niet verzinkt",       # poedercoat: wordt al via coat-ordernummerpatroon uitgesloten van capaciteitsplanning
     "Voorbewerking uitvoeren": "Niet verzinkt",
     "Productie gereed": "Niet verzinkt",
     "Gereserveerd*": "Niet verzinkt",       # reserveringen meenemen in planning
