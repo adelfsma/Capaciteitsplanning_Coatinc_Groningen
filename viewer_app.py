@@ -1149,7 +1149,7 @@ with tab_prod:
                      fontsize=11, fontweight="semibold")
 
     # ── Week-grafieken (huidige selectie, ma t/m vr) ───────────────────────────
-    st.markdown("### Verloop deze week (ma t/m vr)")
+    st.markdown(f"### Verloop deze week (week {int(gekozen_week)}, ma t/m vr)")
     _plot_week = week_curr.head(5).copy()
 
     fig_w, axes_w = plt.subplots(1, 3, figsize=(15, 3.6), dpi=110)
@@ -1166,6 +1166,25 @@ with tab_prod:
     fig_w.tight_layout()
     st.pyplot(fig_w)
     plt.close(fig_w)
+
+    # ── Week-grafieken (vorige week, ma t/m vr) ────────────────────────────────
+    st.markdown(f"### Verloop vorige week (week {int(_iso_prev.week)}, ma t/m vr)")
+    _plot_week_prev = week_prev.head(5).copy()
+
+    fig_wp, axes_wp = plt.subplots(1, 3, figsize=(15, 3.6), dpi=110)
+    fig_wp.patch.set_facecolor("white")
+    _draw_week_chart(axes_wp[0], _plot_week_prev, "MANUREN / TON",
+                     get_norm_manuren_per_ton, "manuren / ton",
+                     "Manuren per ton")
+    _draw_week_chart(axes_wp[1], _plot_week_prev, "AANTAL TRAVERSEN",
+                     get_norm_traversen_per_dag, "traversen",
+                     "Aantal traversen")
+    _draw_week_chart(axes_wp[2], _plot_week_prev, "GEM GEWICHT PER TR",
+                     get_norm_gem_gewicht_per_traverse, "kg / traverse",
+                     "Gemiddeld gewicht per traverse")
+    fig_wp.tight_layout()
+    st.pyplot(fig_wp)
+    plt.close(fig_wp)
 
     # ── YTD-grafieken (per ISO-week van gekozen jaar) ──────────────────────────
     st.markdown(f"### Year to date ({int(gekozen_jaar)}, per week)")
