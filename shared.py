@@ -1,3 +1,4 @@
+import io
 import json
 import re
 import tempfile
@@ -8,7 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.12"
+APP_VERSION = "v2.5.14"
 
 
 def get_app_environment() -> str:
@@ -139,14 +140,14 @@ OTIF_STATUS_MAP = {
     "afgehaald":                 "Ja",
     "coat gereed":               "Ja",
     "ub v gereed":               "Ja",
-    "pc afgehaald":              "Nvt",
+    "pc afgehaald":              "Ja",
+    "pc opgehangen":             "Ja",   # poedercoat hangt al aan het rek → telt als op tijd
     "productie gereed":          "Nee",
     "geblokkeerd":               "Nee",
     "opgehangen":                "Nee",
-    "pc opgehangen":             "Nee",
     "ub":                        "Nee",
     "nabewerking nog uitvoeren": "Nee",
-    "meetrapport":               "Nee",
+    "meetrapport":               "Ja",
 }
 
 # Drempels voor de OTIF-snelheidsmeter in het dashboard.
@@ -193,12 +194,18 @@ DEBTOR_EXPORT_FILE = "debtor-export.xlsx"
 # worden deze klanten (op klantnummer) altijd als 'Aanleveren depot = 1'
 # behandeld. Optioneel en per vestiging: ontbreekt het, dan gebeurt er niets.
 SCHEEPSLEIDINGEN_FILE = "scheepsleidingen.xlsx"
-_BASE_OPTIONAL_FILES = ["Export_CGS.xlsx", DEBTOR_EXPORT_FILE, SCHEEPSLEIDINGEN_FILE]
+# Dagelijkse MIS-export (Management Informatie Systeem). Cumulatieve rijen per
+# dag met o.a. gerealiseerd tonnage, manuren/ton, afkeur, traverses en gemiddeld
+# gewicht per traverse. Wordt door het Productie-dashboard gebruikt. Optioneel:
+# ontbreekt het bestand, dan blijven de MIS-kolommen leeg in het dashboard.
+MIS_FILE = "mis.xlsx"
+_BASE_OPTIONAL_FILES = ["Export_CGS.xlsx", DEBTOR_EXPORT_FILE, SCHEEPSLEIDINGEN_FILE, MIS_FILE]
 
 OPTIONAL_FILE_LABELS = {
     "Export_CGS.xlsx": "Upload Export_CGS.xlsx (optioneel – CGS verzinkplanning)",
     DEBTOR_EXPORT_FILE: "Upload debtor-export.xlsx (optioneel – segment/type materiaal per klant)",
     SCHEEPSLEIDINGEN_FILE: "Upload scheepsleidingen.xlsx (optioneel – klanten met 24-uursservice; worden als depot behandeld)",
+    MIS_FILE: "Upload mis.xlsx (optioneel – cumulatieve MIS-export voor het productie-dashboard)",
     "feestdagen.xlsx": "Upload feestdagen.xlsx (optioneel voor deze vestiging – feestdagenkalender)",
     "Export+1.xlsx": "Upload Export+1.xlsx (optioneel voor deze vestiging)",
     "Export+2.xlsx": "Upload Export+2.xlsx (optioneel voor deze vestiging)",
@@ -358,6 +365,76 @@ def get_otif_uitsluiten_klanten() -> set:
     return {s.strip() for s in str(raw).split(",") if s.strip()}
 
 
+# ── Normen voor het productie-dashboard ───────────────────────────────────────
+# Twee vormen worden ondersteund per KPI-norm:
+#   1) Eén statische waarde: [locatie] norm_manuren_per_ton = 6.0
+#   2) Periode-lijst: [[locatie.normen_manuren_per_ton]] van=... tot=... waarde=...
+# Periode-lijst wint als hij aanwezig én matcht op de gevraagde datum. Anders
+# valt hij terug op de scalar, en anders op de hardcoded default.
+
+def _get_locatie_list(key: str) -> list:
+    """Lees een lijst-instelling uit [locatie]. Geeft [] als leeg/afwezig.
+    De items kunnen dict-achtige objecten zijn (TOML tables), die we
+    normaliseren naar plain dicts."""
+    try:
+        cfg = st.secrets["locatie"]
+        raw = cfg.get(key, None) if hasattr(cfg, "get") else None
+    except (KeyError, FileNotFoundError):
+        raw = None
+    if raw is None:
+        return []
+    try:
+        items = list(raw)
+    except TypeError:
+        return []
+    result = []
+    for item in items:
+        if hasattr(item, "get"):
+            result.append({k: item.get(k) for k in ("van", "tot", "waarde")})
+        elif isinstance(item, dict):
+            result.append(item)
+    return result
+
+
+def _resolve_norm_op_datum(datum, structured_key: str, scalar_key: str, default: float) -> float:
+    """Bepaal de normwaarde voor 'datum'.
+
+    Volgorde:
+      1) Eerste matchende periode uit de gestructureerde lijst.
+      2) Scalar-waarde uit secrets.
+      3) Hardcoded default.
+    Een periode matcht als van <= datum <= tot. 'tot' mag ontbreken (oneindig).
+    """
+    periods = _get_locatie_list(structured_key)
+    if periods:
+        d = pd.Timestamp(datum).normalize()
+        for p in periods:
+            try:
+                van = pd.Timestamp(p.get("van", "1900-01-01")).normalize()
+                tot_raw = p.get("tot")
+                tot = pd.Timestamp(tot_raw).normalize() if tot_raw else pd.Timestamp("9999-12-31")
+                if van <= d <= tot:
+                    return float(p.get("waarde"))
+            except (TypeError, ValueError):
+                continue
+    return float(_get_locatie_number(scalar_key, default))
+
+
+def get_norm_manuren_per_ton(datum) -> float:
+    """Norm manuren per ton op de gegeven datum. Default 6.0."""
+    return _resolve_norm_op_datum(datum, "normen_manuren_per_ton", "norm_manuren_per_ton", 6.0)
+
+
+def get_norm_traversen_per_dag(datum) -> float:
+    """Norm aantal traversen per dag op de gegeven datum. Default 75."""
+    return _resolve_norm_op_datum(datum, "normen_traversen_per_dag", "norm_traversen_per_dag", 75.0)
+
+
+def get_norm_gem_gewicht_per_traverse(datum) -> float:
+    """Norm gemiddeld gewicht (kg) per traverse op de gegeven datum. Default 1000."""
+    return _resolve_norm_op_datum(datum, "normen_gem_gewicht_per_traverse", "norm_gem_gewicht_per_traverse", 1000.0)
+
+
 def _split_required_optional(raw: str) -> tuple[list, list]:
     """Pure helper: bepaal (required, optional) uit de config-string
     'verplichte_bestanden'. Leeg → Groningen-defaults."""
@@ -452,6 +529,236 @@ def load_metadata() -> dict | None:
         return None
 
 
+# ── MIS-data (dagelijkse cumulatieve export) ──────────────────────────────────
+
+# Kolommen uit het MIS-bestand die het productie-dashboard gebruikt.
+MIS_KOLOMMEN = ["Datum", "KG", "ManuurTon", "KG_Afkeur", "Traverses", "M2Trav"]
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_mis_data() -> pd.DataFrame:
+    """Laad de cumulatieve MIS-export uit de bucket.
+
+    Returnt een DataFrame met de kolommen in MIS_KOLOMMEN. Ontbreekt het
+    bestand, dan wordt een leeg DataFrame teruggegeven met dezelfde kolommen
+    (zodat downstream code onvoorwaardelijk kan lookuppen zonder KeyErrors).
+
+    Gecachet met TTL 60s (zie load_published_data)."""
+    empty = pd.DataFrame(columns=MIS_KOLOMMEN)
+    try:
+        data = download_file(MIS_FILE)
+    except Exception:
+        return empty
+    try:
+        df = pd.read_excel(io.BytesIO(data))
+    except Exception:
+        return empty
+
+    missing = [c for c in MIS_KOLOMMEN if c not in df.columns]
+    if missing:
+        raise ValueError(f"MIS-bestand mist kolommen: {', '.join(missing)}")
+
+    result = df[MIS_KOLOMMEN].copy()
+    result["Datum"] = pd.to_datetime(result["Datum"], errors="coerce")
+    # Numeriek forceren; niet-numerieke waarden → NaN
+    for col in ("KG", "ManuurTon", "KG_Afkeur", "Traverses", "M2Trav"):
+        result[col] = pd.to_numeric(result[col], errors="coerce")
+    return result
+
+
+# ── Handmatige dashboard-input (klachten / storingstijd / veiligheid) ─────────
+
+DASHBOARD_MANUAL_FILE = "dashboard_manual.json"
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_dashboard_manual() -> dict:
+    """Laad handmatige dashboard-invoer uit de bucket.
+
+    Structuur:
+      {
+        "YYYY-MM-DD": {
+          "klachten": <int>,
+          "storingstijd_min": <int>,
+          "veiligheidsincidenten": <int>
+        },
+        ...
+      }
+    Ontbreekt het bestand of is het corrupt, dan wordt een leeg dict teruggegeven.
+
+    Gecachet met TTL 60s. Wordt handmatig gecleard na save_dashboard_manual_entry
+    zodat de save meteen zichtbaar is."""
+    try:
+        data = download_file(DASHBOARD_MANUAL_FILE)
+        loaded = json.loads(data.decode("utf-8"))
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_dashboard_manual_entry(
+    datum,
+    klachten: int | None,
+    storingstijd_min: int | None,
+    veiligheidsincidenten: int | None,
+) -> None:
+    """Update de handmatige invoer voor één datum in de bucket.
+
+    Overige datums blijven ongewijzigd. None-waarden worden opgeslagen als 0
+    (het formulier levert altijd een expliciete waarde)."""
+    current = load_dashboard_manual()
+    key = pd.Timestamp(datum).strftime("%Y-%m-%d")
+
+    def _as_int(v):
+        try:
+            return int(v) if v is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    current[key] = {
+        "klachten": _as_int(klachten),
+        "storingstijd_min": _as_int(storingstijd_min),
+        "veiligheidsincidenten": _as_int(veiligheidsincidenten),
+    }
+    upload_file(
+        DASHBOARD_MANUAL_FILE,
+        json.dumps(current, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+    )
+    # Invalidate cache zodat de save meteen zichtbaar is in de viewer.
+    try:
+        load_dashboard_manual.clear()
+    except AttributeError:
+        # Kan alleen gebeuren in test-context zonder Streamlit runtime.
+        pass
+
+
+# ── Daily snapshots (TONNAGE PLAN + OTIF-historie) ────────────────────────────
+
+SNAPSHOT_HISTORY_FILE = "daily_snapshot_history.json"
+SNAPSHOT_RETENTION_DAYS = 365
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_daily_snapshots() -> dict:
+    """Laad de daily-snapshot historie uit de bucket.
+
+    Structuur:
+      {
+        "YYYY-MM-DD": {
+          "tonnage_plan_kg": <float>,
+          "otif_pct": <float|null>,
+          "otif_totaal": <int>,
+          "otif_gereed": <int>,
+          "otif_niet_gereed": <int>,
+          "created_at": "<ISO-timestamp>",
+          "backfilled": <bool>
+        }
+      }
+    Ontbreekt of corrupt → leeg dict. Gecached met TTL 60s en automatisch
+    geinvalideerd na save_daily_snapshot()."""
+    try:
+        data = download_file(SNAPSHOT_HISTORY_FILE)
+        loaded = json.loads(data.decode("utf-8"))
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_daily_snapshot(
+    datum,
+    tonnage_plan_kg: float | None,
+    otif_result: dict | None,
+    overwrite: bool = False,
+    backfilled: bool = False,
+) -> bool:
+    """Sla een snapshot op voor 'datum' in de bucket.
+
+    Retourneert True als er iets geschreven is, False als de entry al bestond
+    en overwrite=False. Bewaart de OTIF-tellers zodat later andere metrics
+    afgeleid kunnen worden. Snoeit automatisch entries ouder dan
+    SNAPSHOT_RETENTION_DAYS.
+
+    De 'backfilled' vlag markeert een handmatig aangemaakte snapshot (bijv.
+    voor een dag waarop de app niet is geopend); die zijn per definitie
+    minder accuraat dan de op-de-dag zelf gemaakte snapshots.
+    """
+    from datetime import datetime as _dt
+
+    key = pd.Timestamp(datum).strftime("%Y-%m-%d")
+    current = load_daily_snapshots()
+
+    if key in current and not overwrite:
+        return False
+
+    def _num(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    otif = otif_result or {}
+    current[key] = {
+        "tonnage_plan_kg": _num(tonnage_plan_kg),
+        "otif_pct": _num(otif.get("otif_pct")),
+        "otif_totaal": int(otif.get("totaal", 0) or 0),
+        "otif_gereed": int(otif.get("gereed", 0) or 0),
+        "otif_niet_gereed": int(otif.get("niet_gereed", 0) or 0),
+        "created_at": _dt.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "backfilled": bool(backfilled),
+    }
+
+    # Snoei entries ouder dan de retentiegrens
+    cutoff = pd.Timestamp(date.today()) - pd.Timedelta(days=SNAPSHOT_RETENTION_DAYS)
+    pruned = {
+        k: v for k, v in current.items()
+        if pd.Timestamp(k) >= cutoff
+    }
+
+    upload_file(
+        SNAPSHOT_HISTORY_FILE,
+        json.dumps(pruned, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+    )
+    try:
+        load_daily_snapshots.clear()
+    except AttributeError:
+        pass
+    return True
+
+
+def build_otif_trend_df(snapshots: dict, days_back: int = 90) -> pd.DataFrame:
+    """Bouw een DataFrame voor de OTIF-trendgrafiek uit de snapshot-historie.
+
+    Retourneert kolommen: Datum, OTIF_pct, Aantal_orders, Backfilled.
+    Sorteert oplopend op datum en filtert op de laatste 'days_back' dagen.
+    Entries zonder OTIF-percentage (bijv. dagen zonder orders) worden
+    overgeslagen zodat de lijn niet naar 0 duikt.
+    """
+    if not snapshots:
+        return pd.DataFrame(columns=["Datum", "OTIF_pct", "Aantal_orders", "Backfilled"])
+
+    cutoff = pd.Timestamp(date.today()) - pd.Timedelta(days=int(days_back))
+    rows = []
+    for key, entry in snapshots.items():
+        try:
+            d = pd.Timestamp(key)
+        except (TypeError, ValueError):
+            continue
+        if d < cutoff:
+            continue
+        pct = entry.get("otif_pct")
+        if pct is None:
+            continue
+        rows.append({
+            "Datum": d,
+            "OTIF_pct": float(pct),
+            "Aantal_orders": int(entry.get("otif_totaal", 0) or 0),
+            "Backfilled": bool(entry.get("backfilled", False)),
+        })
+    if not rows:
+        return pd.DataFrame(columns=["Datum", "OTIF_pct", "Aantal_orders", "Backfilled"])
+    return pd.DataFrame(rows).sort_values("Datum").reset_index(drop=True)
+
+
 # ── Validation helpers (work on any Path folder) ───────────────────────────────
 
 def validate_feestdagen_xlsx(file_path: Path) -> bool:
@@ -464,6 +771,18 @@ def validate_feestdagen_xlsx(file_path: Path) -> bool:
     df["Datum"] = pd.to_datetime(df["Datum"], errors="coerce")
     if df["Datum"].isna().any():
         raise ValueError("feestdagen.xlsx bevat ongeldige datums.")
+    return True
+
+
+def validate_mis_xlsx(file_path: Path) -> bool:
+    """Controleer of het MIS-bestand de benodigde kolommen en geldige datums bevat."""
+    df = pd.read_excel(file_path)
+    missing = [c for c in MIS_KOLOMMEN if c not in df.columns]
+    if missing:
+        raise ValueError(f"{MIS_FILE} mist kolommen: {', '.join(missing)}")
+    parsed = pd.to_datetime(df["Datum"], errors="coerce")
+    if parsed.isna().all():
+        raise ValueError(f"{MIS_FILE}: geen geldige datums gevonden in kolom 'Datum'.")
     return True
 
 
@@ -881,12 +1200,18 @@ def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataF
     return reserveringen
 
 
+@st.cache_data(ttl=60, show_spinner="Data laden uit de cloud…")
 def load_published_data():
     """
     Downloads all required files from the cloud bucket into a local temp
     directory, then processes them into DataFrames.
 
     Returns: (merged, export_file_summary, order_file_name, holiday_df)
+
+    Gecachet met TTL 60s: bij elke rerun binnen die tijd komt het resultaat
+    uit de cache. Nieuwe publicaties zijn binnen 60s zichtbaar. Om direct te
+    verversen: gebruik de 'Ververs data' knop in de sidebar (die roept
+    st.cache_data.clear() aan).
     """
     tmp = _ensure_temp()
 
@@ -1253,6 +1578,7 @@ def build_horizon_and_include_holidays(
     return pd.DataFrame(rows)
 
 
+@st.cache_data(show_spinner=False)
 def build_dashboard_data(
     df_raw: pd.DataFrame,
     holiday_df: pd.DataFrame,
@@ -1443,6 +1769,193 @@ def build_dashboard_data(
     return df, df_plan, dag, week, advies_datum
 
 
+# ── Productie-dashboard (KPI-tabel per week, gevoed door MIS + planning) ──────
+
+_DAG_KORT_NL = {0: "Ma", 1: "Di", 2: "Wo", 3: "Do", 4: "Vr", 5: "Za", 6: "Zo"}
+
+PRODUCTIE_DASHBOARD_KOLOMMEN = [
+    "Dag",
+    "Datum",
+    "TONNAGE PLAN",
+    "TONNAGE WERKELIJK",
+    "MANUREN / TON",
+    "AFKEUR IN KG",
+    "AANTAL TRAVERSEN",
+    "GEM GEWICHT PER TR",
+    "AANTAL KLACHTEN",
+    "Storingstijd in min",
+    "VEILIGHEIDSINCIDENTEN",
+]
+
+
+@st.cache_data(show_spinner=False)
+def build_productie_dashboard_week(
+    mis_df: pd.DataFrame,
+    dag_df: pd.DataFrame,
+    manual_dict: dict,
+    jaar: int,
+    weeknr: int,
+    feestdagen: set | frozenset | None = None,
+    snapshots: dict | None = None,
+) -> pd.DataFrame:
+    """Bouw de KPI-tabel voor één ISO-week (7 rijen ma t/m zo).
+
+    Bronnen:
+      - mis_df: cumulatieve MIS-export (kolommen zoals in MIS_KOLOMMEN).
+      - dag_df: uit build_dashboard_data() — Verzinkdatum + Gewicht_kg per dag.
+        Levert TONNAGE PLAN voor peildatum en verder.
+      - manual_dict: uit load_dashboard_manual().
+      - snapshots: uit load_daily_snapshots(). Levert TONNAGE PLAN voor
+        historische dagen. Ontbreekt de snapshot voor een historische dag,
+        dan blijft TONNAGE PLAN leeg voor die dag (geen misleidende
+        actualisering).
+      - feestdagen: set van datums die als sluiting gelden.
+
+    Weekend en feestdagen krijgen alle KPI-velden None, tenzij er MIS-data
+    voor die dag bestaat (bijv. gewerkte zaterdag): dan wordt de rij normaal
+    gevuld.
+    """
+    feestdagen_norm = {pd.Timestamp(d).normalize() for d in (feestdagen or set())}
+
+    # ISO-week: maandag = dag 1
+    monday = pd.Timestamp.fromisocalendar(int(jaar), int(weeknr), 1)
+    dates = [monday + pd.Timedelta(days=i) for i in range(7)]
+
+    # MIS-lookup per genormaliseerde datum
+    mis_by_date: dict = {}
+    if mis_df is not None and not mis_df.empty and "Datum" in mis_df.columns:
+        mis_norm = mis_df.copy()
+        mis_norm["Datum"] = pd.to_datetime(mis_norm["Datum"], errors="coerce").dt.normalize()
+        mis_norm = mis_norm.dropna(subset=["Datum"])
+        # Bij duplicaten: laatste rij wint
+        for _, row in mis_norm.iterrows():
+            mis_by_date[row["Datum"]] = row
+
+    # Plan-lookup per genormaliseerde verzinkdatum
+    plan_by_date: dict = {}
+    if dag_df is not None and not dag_df.empty and "Verzinkdatum" in dag_df.columns:
+        dg = dag_df.copy()
+        dg["Verzinkdatum"] = pd.to_datetime(dg["Verzinkdatum"], errors="coerce").dt.normalize()
+        dg = dg.dropna(subset=["Verzinkdatum"])
+        for _, row in dg.iterrows():
+            plan_by_date[row["Verzinkdatum"]] = float(row.get("Gewicht_kg", 0) or 0)
+
+    today_norm = pd.Timestamp(date.today()).normalize()
+    rows = []
+    for d in dates:
+        d_norm = pd.Timestamp(d).normalize()
+        is_weekend = d_norm.dayofweek >= 5
+        is_feestdag = d_norm in feestdagen_norm
+        mis_row = mis_by_date.get(d_norm)
+        has_mis = mis_row is not None and pd.notna(mis_row.get("KG"))
+
+        row = {"Dag": _DAG_KORT_NL[d_norm.dayofweek], "Datum": d_norm.date()}
+
+        # Weekend/feestdag zonder MIS-data → volledig leeg
+        if (is_weekend or is_feestdag) and not has_mis:
+            for k in PRODUCTIE_DASHBOARD_KOLOMMEN[2:]:
+                row[k] = None
+            rows.append(row)
+            continue
+
+        # TONNAGE PLAN:
+        #   - vandaag en verder: uit dag_df (actuele berekening)
+        #   - historisch: uit snapshot als beschikbaar, anders leeg
+        if d_norm >= today_norm:
+            row["TONNAGE PLAN"] = plan_by_date.get(d_norm)
+        else:
+            snap_key = d_norm.strftime("%Y-%m-%d")
+            snap = (snapshots or {}).get(snap_key)
+            row["TONNAGE PLAN"] = float(snap["tonnage_plan_kg"]) if (
+                snap and snap.get("tonnage_plan_kg") is not None
+            ) else None
+
+        # MIS-velden
+        if mis_row is not None:
+            def _num(colname):
+                v = mis_row.get(colname)
+                return float(v) if pd.notna(v) else None
+            row["TONNAGE WERKELIJK"] = _num("KG")
+            row["MANUREN / TON"]     = _num("ManuurTon")
+            row["AFKEUR IN KG"]      = _num("KG_Afkeur")
+            row["AANTAL TRAVERSEN"]  = _num("Traverses")
+            row["GEM GEWICHT PER TR"] = _num("M2Trav")
+        else:
+            row["TONNAGE WERKELIJK"] = None
+            row["MANUREN / TON"]     = None
+            row["AFKEUR IN KG"]      = None
+            row["AANTAL TRAVERSEN"]  = None
+            row["GEM GEWICHT PER TR"] = None
+
+        # Handmatige invoer
+        manual = manual_dict.get(d_norm.strftime("%Y-%m-%d"), {}) if manual_dict else {}
+        row["AANTAL KLACHTEN"]        = manual.get("klachten")
+        row["Storingstijd in min"]    = manual.get("storingstijd_min")
+        row["VEILIGHEIDSINCIDENTEN"]  = manual.get("veiligheidsincidenten")
+
+        rows.append(row)
+
+    return pd.DataFrame(rows, columns=PRODUCTIE_DASHBOARD_KOLOMMEN)
+
+
+@st.cache_data(show_spinner=False)
+def build_productie_dashboard_ytd(mis_df: pd.DataFrame, jaar: int) -> pd.DataFrame:
+    """Aggregeer MIS-data per ISO-week voor het gegeven jaar (t/m vandaag).
+
+    Retourneert DataFrame met kolommen:
+      Weeknr, Week_startdatum, Werkelijk_kg_totaal, Manuren_per_ton_gewogen,
+      Traversen_totaal, Gem_gewicht_per_traverse
+
+    Aggregatie-regels:
+      - Werkelijk kg: som van KG per week.
+      - Manuren/ton: gewogen gemiddelde met KG als gewicht
+        (som(ManuurTon * KG) / som(KG)). Rijen zonder KG worden overgeslagen.
+      - Traversen: som per week.
+      - Gem gewicht/traverse: som(KG) / som(Traversen) per week (gewogen).
+    """
+    empty_cols = [
+        "Weeknr", "Week_startdatum", "Werkelijk_kg_totaal",
+        "Manuren_per_ton_gewogen", "Traversen_totaal", "Gem_gewicht_per_traverse",
+    ]
+    if mis_df is None or mis_df.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    df = mis_df.copy()
+    df["Datum"] = pd.to_datetime(df["Datum"], errors="coerce")
+    df = df.dropna(subset=["Datum"])
+
+    today = pd.Timestamp(date.today()).normalize()
+    iso = df["Datum"].dt.isocalendar()
+    df["Jaar_iso"] = iso.year.astype(int)
+    df["Weeknr"]   = iso.week.astype(int)
+    df = df[(df["Jaar_iso"] == int(jaar)) & (df["Datum"] <= today)]
+
+    # Alleen rijen met werkelijke productie meenemen
+    df = df[df["KG"].notna() & (df["KG"] > 0)]
+    if df.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    df["ManuurTon_x_KG"] = df["ManuurTon"].fillna(0) * df["KG"]
+
+    grouped = df.groupby(["Jaar_iso", "Weeknr"], as_index=False).agg(
+        Werkelijk_kg_totaal=("KG", "sum"),
+        Manuren_per_ton_gemiddeld=("ManuurTon", "mean"),
+        Traversen_totaal=("Traverses", "sum"),
+    )
+    grouped["Manuren_per_ton_gewogen"] = grouped["Manuren_per_ton_gemiddeld"]
+    grouped["Gem_gewicht_per_traverse"] = np.where(
+        grouped["Traversen_totaal"] > 0,
+        grouped["Werkelijk_kg_totaal"] / grouped["Traversen_totaal"],
+        np.nan,
+    )
+    grouped = grouped.sort_values(["Jaar_iso", "Weeknr"]).reset_index(drop=True)
+    grouped["Week_startdatum"] = grouped.apply(
+        lambda r: pd.Timestamp.fromisocalendar(int(r["Jaar_iso"]), int(r["Weeknr"]), 1),
+        axis=1,
+    )
+    return grouped[empty_cols]
+
+
 # ── OTIF helpers (KPI: percentage orders op tijd gereed) ──────────────────────
 
 def map_otif_status(status) -> str:
@@ -1530,6 +2043,79 @@ def _empty_otif_result(peildatum, date_column: str, date_column_label: str) -> d
     }
 
 
+def compute_otif_from_folder(tmp_dir: Path) -> dict | None:
+    """Bereken de OTIF vanuit een al-gevulde temp-folder (zoals in de manager).
+
+    Gebruikt dezelfde parameters als compute_otif() maar leest de bestanden
+    uit tmp_dir in plaats van uit de cloud. Bedoeld om direct na publicatie
+    een OTIF-snapshot op te slaan op het moment van de export — het enige
+    betrouwbare moment waarop de status van de orders exact is zoals die dag
+    werkelijk was.
+
+    Retourneert het compute_otif-resultaat dict, of None als de benodigde
+    bestanden ontbreken of de berekening mislukt (zodat de aanroeper dit
+    als een zacht falen kan behandelen zonder de publicatie te blokkeren).
+    """
+    try:
+        order_file = None
+        for candidate in ("OrderExport2G.xlsx",):
+            if (tmp_dir / candidate).exists():
+                order_file = candidate
+                break
+        if order_file is None:
+            return None
+
+        export_files = [
+            "Export-1.xlsx", "Export.xlsx",
+            "Export+1.xlsx", "Export+2.xlsx", "Export+3.xlsx", "Export+4.xlsx",
+        ]
+        frames = []
+        for fname in export_files:
+            p = tmp_dir / fname
+            if p.exists():
+                try:
+                    frames.append(pd.read_excel(p))
+                except Exception:
+                    pass
+
+        order_df = pd.read_excel(tmp_dir / order_file)
+        merged = pd.concat([order_df] + frames, ignore_index=True) if frames else order_df.copy()
+
+        # Basiskolommen die compute_otif nodig heeft
+        if "Leverdatum" not in merged.columns:
+            return None
+        merged["Leverdatum"] = pd.to_datetime(merged["Leverdatum"], errors="coerce")
+        if "Status" not in merged.columns:
+            return None
+
+        # Verzinkstatus afleiden voor UB-uitsluiting (zelfde als in load_published_data)
+        merged["Verzinkstatus"] = merged["Status"].map(STATUS_MAP)
+
+        # Feestdagen
+        holiday_dates: set = set()
+        feest_path = tmp_dir / "feestdagen.xlsx"
+        if feest_path.exists():
+            try:
+                hdf = pd.read_excel(feest_path)
+                hdf["Datum"] = pd.to_datetime(hdf["Datum"], errors="coerce")
+                holiday_dates = set(hdf["Datum"].dropna().tolist())
+            except Exception:
+                pass
+
+        peildatum = date.today()
+        return compute_otif(
+            merged,
+            peildatum=peildatum,
+            holiday_dates=holiday_dates,
+            poetsen_afgehaald_niet_ok=get_poetsen_otif_actief(),
+            uitsluiten_statussen=get_otif_uitsluiten_statussen(),
+            uitsluiten_klanten=get_otif_uitsluiten_klanten(),
+        )
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
 def compute_otif(
     merged: pd.DataFrame,
     peildatum,
