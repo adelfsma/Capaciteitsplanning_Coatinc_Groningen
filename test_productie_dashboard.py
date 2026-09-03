@@ -237,8 +237,8 @@ class TestBuildProductieDashboardYtd:
         assert row["Weeknr"] == 35
         assert row["Werkelijk_kg_totaal"] == 200000
         assert row["Traversen_totaal"] == 200
-        # Gewogen gemiddelde: (70000*6 + 80000*5.5 + 50000*7) / 200000 = 6.05
-        assert abs(row["Manuren_per_ton_gewogen"] - 6.05) < 0.001
+        # Rekenkundig gemiddelde: (6.0 + 5.5 + 7.0) / 3 = 6.1667
+        assert abs(row["Manuren_per_ton_gewogen"] - (6.0 + 5.5 + 7.0) / 3) < 0.001
         # Gem gewicht: 200000 / 200 = 1000
         assert row["Gem_gewicht_per_traverse"] == 1000.0
 

@@ -140,14 +140,14 @@ OTIF_STATUS_MAP = {
     "afgehaald":                 "Ja",
     "coat gereed":               "Ja",
     "ub v gereed":               "Ja",
-    "pc afgehaald":              "Ja",
+    "pc afgehaald":              "Nvt",
     "pc opgehangen":             "Ja",   # poedercoat hangt al aan het rek → telt als op tijd
     "productie gereed":          "Nee",
     "geblokkeerd":               "Nee",
     "opgehangen":                "Nee",
-    "ub":                        "ja",
+    "ub":                        "Nee",
     "nabewerking nog uitvoeren": "Nee",
-    "meetrapport":               "ja",
+    "meetrapport":               "Nee",
 }
 
 # Drempels voor de OTIF-snelheidsmeter in het dashboard.
@@ -1939,14 +1939,10 @@ def build_productie_dashboard_ytd(mis_df: pd.DataFrame, jaar: int) -> pd.DataFra
 
     grouped = df.groupby(["Jaar_iso", "Weeknr"], as_index=False).agg(
         Werkelijk_kg_totaal=("KG", "sum"),
-        ManuurTon_x_KG_sum=("ManuurTon_x_KG", "sum"),
+        Manuren_per_ton_gemiddeld=("ManuurTon", "mean"),
         Traversen_totaal=("Traverses", "sum"),
     )
-    grouped["Manuren_per_ton_gewogen"] = np.where(
-        grouped["Werkelijk_kg_totaal"] > 0,
-        grouped["ManuurTon_x_KG_sum"] / grouped["Werkelijk_kg_totaal"],
-        np.nan,
-    )
+    grouped["Manuren_per_ton_gewogen"] = grouped["Manuren_per_ton_gemiddeld"]
     grouped["Gem_gewicht_per_traverse"] = np.where(
         grouped["Traversen_totaal"] > 0,
         grouped["Werkelijk_kg_totaal"] / grouped["Traversen_totaal"],

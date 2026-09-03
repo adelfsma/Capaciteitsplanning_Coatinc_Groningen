@@ -1050,7 +1050,7 @@ with tab_prod:
         "Datum":                  st.column_config.TextColumn("Datum",     width="small"),
         "TONNAGE PLAN":           st.column_config.TextColumn("Plan (kg)", width="small"),
         "TONNAGE WERKELIJK":      st.column_config.TextColumn("Werkelijk (kg)", width="small"),
-        "MANUREN / TON":          st.column_config.TextColumn("mu/ton",    width="small"),
+        "MANUREN / TON":          st.column_config.TextColumn("manuur/ton", width="small"),
         "AFKEUR IN KG":           st.column_config.TextColumn("Afkeur (kg)", width="small"),
         "AANTAL TRAVERSEN":       st.column_config.TextColumn("Trav.",     width="small"),
         "GEM GEWICHT PER TR":     st.column_config.TextColumn("kg/trav.",  width="small"),
@@ -1252,7 +1252,7 @@ with tab_prod:
         fig_y.patch.set_facecolor("white")
         _draw_ytd_chart(axes_y[0], ytd_df, "Manuren_per_ton_gewogen",
                         get_norm_manuren_per_ton, "manuren / ton",
-                        "Manuren per ton (gewogen)")
+                        "Manuren per ton (gem. per dag)")
         _draw_ytd_chart(axes_y[1], ytd_df, "Traversen_totaal",
                         lambda d: get_norm_traversen_per_dag(d) * 5,
                         "traversen / week",
@@ -1264,8 +1264,9 @@ with tab_prod:
         st.pyplot(fig_y)
         plt.close(fig_y)
         st.caption(
-            "YTD-aggregatie: manuren/ton en gem gewicht/traverse zijn gewogen naar "
-            "kg-productie per dag. Norm voor traversen is dag-norm × 5 werkdagen."
+            "YTD-aggregatie: manuren/ton is het rekenkundig gemiddelde van de dagwaarden per week. "
+            "Gem gewicht/traverse is som(KG)/som(traversen) per week. "
+            "Norm voor traversen is dag-norm × 5 werkdagen."
         )
 
     # ── OTIF-trend (uit snapshot-historie) ─────────────────────────────────────
