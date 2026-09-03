@@ -591,6 +591,13 @@ _logo = get_locatie_logo()
 if os.path.exists(_logo):
     st.sidebar.image(_logo, width=200)
 st.sidebar.caption(APP_VERSION)
+
+# Handmatige cache-refresh. Data uit de cloud wordt automatisch elke 60s
+# ververst; deze knop forceert een directe refresh na een nieuwe publicatie.
+if st.sidebar.button("🔄 Ververs data", help="Haal de nieuwste data uit de cloud"):
+    st.cache_data.clear()
+    st.rerun()
+
 render_environment_banner("Viewer")
 
 meta = load_metadata()

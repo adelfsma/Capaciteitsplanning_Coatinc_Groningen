@@ -535,12 +535,15 @@ def load_metadata() -> dict | None:
 MIS_KOLOMMEN = ["Datum", "KG", "ManuurTon", "KG_Afkeur", "Traverses", "M2Trav"]
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def load_mis_data() -> pd.DataFrame:
     """Laad de cumulatieve MIS-export uit de bucket.
 
     Returnt een DataFrame met de kolommen in MIS_KOLOMMEN. Ontbreekt het
     bestand, dan wordt een leeg DataFrame teruggegeven met dezelfde kolommen
-    (zodat downstream code onvoorwaardelijk kan lookuppen zonder KeyErrors)."""
+    (zodat downstream code onvoorwaardelijk kan lookuppen zonder KeyErrors).
+
+    Gecachet met TTL 60s (zie load_published_data)."""
     empty = pd.DataFrame(columns=MIS_KOLOMMEN)
     try:
         data = download_file(MIS_FILE)
@@ -568,6 +571,7 @@ def load_mis_data() -> pd.DataFrame:
 DASHBOARD_MANUAL_FILE = "dashboard_manual.json"
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def load_dashboard_manual() -> dict:
     """Laad handmatige dashboard-invoer uit de bucket.
 
@@ -581,7 +585,9 @@ def load_dashboard_manual() -> dict:
         ...
       }
     Ontbreekt het bestand of is het corrupt, dan wordt een leeg dict teruggegeven.
-    """
+
+    Gecachet met TTL 60s. Wordt handmatig gecleard na save_dashboard_manual_entry
+    zodat de save meteen zichtbaar is."""
     try:
         data = download_file(DASHBOARD_MANUAL_FILE)
         loaded = json.loads(data.decode("utf-8"))
@@ -618,6 +624,12 @@ def save_dashboard_manual_entry(
         DASHBOARD_MANUAL_FILE,
         json.dumps(current, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8"),
     )
+    # Invalidate cache zodat de save meteen zichtbaar is in de viewer.
+    try:
+        load_dashboard_manual.clear()
+    except AttributeError:
+        # Kan alleen gebeuren in test-context zonder Streamlit runtime.
+        pass
 
 
 # ── Validation helpers (work on any Path folder) ───────────────────────────────
@@ -1061,12 +1073,18 @@ def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataF
     return reserveringen
 
 
+@st.cache_data(ttl=60, show_spinner="Data laden uit de cloud…")
 def load_published_data():
     """
     Downloads all required files from the cloud bucket into a local temp
     directory, then processes them into DataFrames.
 
     Returns: (merged, export_file_summary, order_file_name, holiday_df)
+
+    Gecachet met TTL 60s: bij elke rerun binnen die tijd komt het resultaat
+    uit de cache. Nieuwe publicaties zijn binnen 60s zichtbaar. Om direct te
+    verversen: gebruik de 'Ververs data' knop in de sidebar (die roept
+    st.cache_data.clear() aan).
     """
     tmp = _ensure_temp()
 
@@ -1433,6 +1451,7 @@ def build_horizon_and_include_holidays(
     return pd.DataFrame(rows)
 
 
+@st.cache_data(show_spinner=False)
 def build_dashboard_data(
     df_raw: pd.DataFrame,
     holiday_df: pd.DataFrame,
@@ -1642,13 +1661,14 @@ PRODUCTIE_DASHBOARD_KOLOMMEN = [
 ]
 
 
+@st.cache_data(show_spinner=False)
 def build_productie_dashboard_week(
     mis_df: pd.DataFrame,
     dag_df: pd.DataFrame,
     manual_dict: dict,
     jaar: int,
     weeknr: int,
-    feestdagen: set | None = None,
+    feestdagen: set | frozenset | None = None,
 ) -> pd.DataFrame:
     """Bouw de KPI-tabel voor één ISO-week (7 rijen ma t/m zo).
 
@@ -1741,6 +1761,7 @@ def build_productie_dashboard_week(
     return pd.DataFrame(rows, columns=PRODUCTIE_DASHBOARD_KOLOMMEN)
 
 
+@st.cache_data(show_spinner=False)
 def build_productie_dashboard_ytd(mis_df: pd.DataFrame, jaar: int) -> pd.DataFrame:
     """Aggregeer MIS-data per ISO-week voor het gegeven jaar (t/m vandaag).
 
@@ -1889,6 +1910,7 @@ def _empty_otif_result(peildatum, date_column: str, date_column_label: str) -> d
     }
 
 
+@st.cache_data(show_spinner=False)
 def compute_otif(
     merged: pd.DataFrame,
     peildatum,

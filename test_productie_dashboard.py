@@ -27,7 +27,22 @@ from shared import (  # noqa: E402
     build_productie_dashboard_ytd,
     _resolve_norm_op_datum,
     load_dashboard_manual,
+    load_mis_data,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_streamlit_cache():
+    """Zorg dat elke test met een leeg cache begint. Nodig omdat de load- en
+    build-functies met @st.cache_data zijn gedecoreerd; zonder clear zouden
+    mock-patches in opvolgende tests een cache-hit teruggeven."""
+    for fn in (load_dashboard_manual, load_mis_data,
+               build_productie_dashboard_week, build_productie_dashboard_ytd):
+        try:
+            fn.clear()
+        except AttributeError:
+            pass
+    yield
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────

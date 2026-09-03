@@ -1,5 +1,49 @@
 # v2.5.13 — Statusaanpassing "Opgehangen" + Productie dashboard (iteratie 1)
 
+## Performance — caching op alle IO en berekeningen
+
+Cache toegevoegd op de traagste functies zodat sidebar-wijzigingen en week-/jaar-
+selecties niet steeds een volledige cloud-download + herberekening triggeren.
+
+### Gecacht in `shared.py` (met `@st.cache_data`)
+- `load_published_data` — TTL 60s. De grootste bottleneck (downloadt alle Excel-
+  bestanden uit Supabase + parseert ze, was 5-15s per rerun).
+- `load_mis_data` — TTL 60s.
+- `load_dashboard_manual` — TTL 60s. Automatisch geinvalideerd na
+  `save_dashboard_manual_entry()` zodat een net opgeslagen entry meteen zichtbaar is.
+- `build_dashboard_data` — geen TTL, invalidate op basis van hash van argumenten
+  (df_raw, holiday_df, startdatum, capaciteit_kg, offset, kg_per_traverse). Cache
+  hit zolang die argumenten hetzelfde zijn.
+- `compute_otif` — geen TTL, idem.
+- `build_productie_dashboard_week` en `build_productie_dashboard_ytd` — geen TTL,
+  cache hit zolang argumenten (mis_df, dag_df, manual_dict, jaar, weeknr,
+  feestdagen) ongewijzigd zijn.
+
+### Nieuw in `viewer_app.py`
+- **🔄 Ververs data** knop bovenin de sidebar. Roept `st.cache_data.clear()` +
+  `st.rerun()` aan zodat de gebruiker direct de laatste publicatie kan ophalen
+  zonder de 60s TTL af te wachten.
+
+### Verwachte snelheidswinst
+| Scenario | Voor | Na |
+|---|---|---|
+| Eerste laad na browser refresh | 5-15s | 5-15s (cache miss) |
+| Week/jaar wijzigen in Productie dashboard | 5-15s | <1s (alle caches hit) |
+| Sidebar wijziging met dezelfde parameters | 5-15s | <1s |
+| Sidebar wijziging met andere parameters (bijv. andere capaciteit) | 5-15s | 1-3s (cloud cache hit, alleen build recompute) |
+| Tab wisselen | 5-15s | <1s |
+| Nieuwe publicatie zichtbaar | direct | binnen 60s (of instant via Ververs-knop) |
+
+### Cache invalidation
+- Automatisch: elke 60s voor cloud-load functies; direct na
+  `save_dashboard_manual_entry()`.
+- Handmatig: "Ververs data" knop in de sidebar.
+- Tests: `test_productie_dashboard.py` heeft een autouse fixture die alle caches
+  leegmaakt voor elke test (zonder deze zouden mock-patches in opeenvolgende
+  tests een cache-hit teruggeven).
+
+---
+
 ## STATUS_MAP-aanpassing
 
 - **`Opgehangen`** verschoven van `Niet verzinkt` → `Verzinkt`.
