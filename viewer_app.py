@@ -13,10 +13,15 @@ from shared import (
     WITTE_VOORRAAD_STATUSSEN,
     OTIF_GAUGE_GREEN_THRESHOLD,
     OTIF_GAUGE_ORANGE_THRESHOLD,
+    PRODUCTIE_DASHBOARD_KOLOMMEN,
     previous_workday,
     load_published_data,
     load_metadata,
+    load_mis_data,
+    load_dashboard_manual,
+    save_dashboard_manual_entry,
     build_dashboard_data,
+    build_productie_dashboard_week,
     compute_otif,
     get_peildatum_from_metadata,
     find_originele_leverdatum_column,
@@ -32,6 +37,10 @@ from shared import (
     get_kg_traverse_defaults,
     get_otif_uitsluiten_statussen,
     get_otif_uitsluiten_klanten,
+    get_beheer_wachtwoord,
+    get_norm_manuren_per_ton,
+    get_norm_traversen_per_dag,
+    get_norm_gem_gewicht_per_traverse,
 )
 
 st.set_page_config(layout="wide", page_title=get_page_title(f"Capaciteitsplanning {get_locatie_naam()}"))
@@ -705,7 +714,9 @@ otif_result = compute_otif(
     uitsluiten_klanten=get_otif_uitsluiten_klanten(),
 )
 
-tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Gebruikte gegevens", "OTIF", "Debug"])
+tab1, tab_prod, tab2, tab3, tab4 = st.tabs(
+    ["Voorraad & OTIF", "Productie dashboard", "Gebruikte gegevens", "OTIF", "Debug"]
+)
 
 with tab1:
     st.subheader("Voorraadoverzicht en OTIF")
@@ -884,6 +895,160 @@ with tab1:
     holiday_show = holiday_df.copy()
     holiday_show["Datum"] = pd.to_datetime(holiday_show["Datum"]).dt.strftime("%d-%m-%Y")
     st.dataframe(holiday_show, width="stretch", hide_index=True)
+
+# ── Tab: Productie dashboard ───────────────────────────────────────────────────
+with tab_prod:
+    st.subheader("Productie dashboard")
+    st.caption(
+        "KPI-overzicht per week (bron: MIS-export + capaciteitsplanning). "
+        "Historische plan-waarden komen beschikbaar in een volgende versie."
+    )
+
+    # MIS-data en handmatige invoer laden
+    try:
+        mis_df = load_mis_data()
+    except Exception as e:
+        st.error(f"MIS-bestand kon niet worden ingeladen: {e}")
+        mis_df = pd.DataFrame()
+
+    manual_dict = load_dashboard_manual()
+
+    if mis_df.empty:
+        st.warning(
+            "Er is nog geen MIS-bestand (`mis.xlsx`) beschikbaar in de cloud. "
+            "Vraag de beheerder om deze te uploaden via de beheeromgeving."
+        )
+
+    # Week-selector: huidige ISO-week als default
+    _today = pd.Timestamp(date.today()).normalize()
+    _iso_now = _today.isocalendar()
+    prod_col_l, prod_col_r = st.columns([1, 3])
+    with prod_col_l:
+        gekozen_jaar = st.number_input(
+            "Jaar", min_value=2024, max_value=2099, value=int(_iso_now.year), step=1
+        )
+        gekozen_week = st.number_input(
+            "Weeknummer", min_value=1, max_value=53, value=int(_iso_now.week), step=1
+        )
+
+    _feest_set = set(pd.to_datetime(holiday_df["Datum"]).tolist()) if not holiday_df.empty else set()
+
+    # Bouw beide weken (huidige/gekozen + vorige)
+    _monday_current = pd.Timestamp.fromisocalendar(int(gekozen_jaar), int(gekozen_week), 1)
+    _monday_prev = _monday_current - pd.Timedelta(days=7)
+    _iso_prev = _monday_prev.isocalendar()
+
+    week_curr = build_productie_dashboard_week(
+        mis_df, dag, manual_dict, int(gekozen_jaar), int(gekozen_week), _feest_set,
+    )
+    week_prev = build_productie_dashboard_week(
+        mis_df, dag, manual_dict, int(_iso_prev.year), int(_iso_prev.week), _feest_set,
+    )
+
+    # ── Handmatige invoer (wachtwoordbeveiligd) ────────────────────────────────
+    with st.expander("🔒 Handmatige velden invoeren (beheer)"):
+        pw = st.text_input("Beheerwachtwoord", type="password", key="prod_dashboard_pw")
+        if pw == "" :
+            st.caption("Vul het beheerwachtwoord in om handmatige velden op te slaan.")
+        elif pw != get_beheer_wachtwoord():
+            st.error("Onjuist wachtwoord.")
+        else:
+            st.success("Ingelogd als beheerder.")
+            invoer_datum = st.date_input(
+                "Datum",
+                value=date.today(),
+                help="Kies de dag waarop de handmatige velden betrekking hebben.",
+            )
+            bestaand = manual_dict.get(pd.Timestamp(invoer_datum).strftime("%Y-%m-%d"), {})
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                inp_klachten = st.number_input(
+                    "Aantal klachten",
+                    min_value=0, step=1,
+                    value=int(bestaand.get("klachten", 0)),
+                )
+            with c2:
+                inp_storing = st.number_input(
+                    "Storingstijd (min)",
+                    min_value=0, step=1,
+                    value=int(bestaand.get("storingstijd_min", 0)),
+                )
+            with c3:
+                inp_veilig = st.number_input(
+                    "Veiligheidsincidenten",
+                    min_value=0, step=1,
+                    value=int(bestaand.get("veiligheidsincidenten", 0)),
+                )
+            if st.button("Opslaan", type="primary"):
+                try:
+                    save_dashboard_manual_entry(invoer_datum, inp_klachten, inp_storing, inp_veilig)
+                    st.success(f"✅ Opgeslagen voor {invoer_datum.strftime('%d-%m-%Y')}.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Opslaan mislukt: {e}")
+
+    # ── Weektabellen naast elkaar ──────────────────────────────────────────────
+    def _fmt_week_df(week_df: pd.DataFrame) -> pd.DataFrame:
+        """Format de tabel: datums als dd-mm, getallen met duizendtal-punt."""
+        out = week_df.copy()
+        out["Datum"] = pd.to_datetime(out["Datum"]).dt.strftime("%d-%m")
+        int_cols = ["TONNAGE PLAN", "TONNAGE WERKELIJK", "AFKEUR IN KG", "AANTAL TRAVERSEN",
+                    "GEM GEWICHT PER TR", "AANTAL KLACHTEN", "Storingstijd in min",
+                    "VEILIGHEIDSINCIDENTEN"]
+        for c in int_cols:
+            if c in out.columns:
+                out[c] = out[c].apply(lambda v: format_int(v) if pd.notna(v) else "")
+        if "MANUREN / TON" in out.columns:
+            out["MANUREN / TON"] = out["MANUREN / TON"].apply(
+                lambda v: f"{v:.2f}".replace(".", ",") if pd.notna(v) else ""
+            )
+        return out
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown(f"**Week {int(gekozen_week)} — huidige selectie**")
+        st.dataframe(_fmt_week_df(week_curr), width="stretch", hide_index=True)
+    with right:
+        st.markdown(f"**Week {int(_iso_prev.week)} — vorige week**")
+        st.dataframe(_fmt_week_df(week_prev), width="stretch", hide_index=True)
+
+    # ── Grafieken met normen-lijnen ────────────────────────────────────────────
+    st.markdown("### Verloop met normen (huidige selectie, ma t/m vr)")
+
+    # Alleen werkdagen met werkelijke MIS-data plotten voor helderheid
+    _plot_df = week_curr.head(5).copy()  # ma t/m vr
+
+    def _norm_series(getter, week_df: pd.DataFrame):
+        return [getter(d) for d in pd.to_datetime(week_df["Datum"])]
+
+    def _draw_kpi_chart(titel: str, kpi_col: str, norm_getter, y_label: str):
+        werkelijk = _plot_df[kpi_col].tolist()
+        # Als alles leeg is: helemaal geen grafiek tonen
+        if not any(pd.notna(v) for v in werkelijk):
+            st.info(f"Geen {kpi_col.lower()}-data beschikbaar in deze week.")
+            return
+        norm_waarden = _norm_series(norm_getter, _plot_df)
+        fig, ax = plt.subplots(figsize=(8, 3))
+        x = np.arange(len(_plot_df))
+        ax.bar(x, [v if pd.notna(v) else 0 for v in werkelijk],
+               color="#2E75B6", label="Werkelijk", alpha=0.85)
+        ax.plot(x, norm_waarden, color="#C00000", marker="o",
+                linewidth=2, label="Norm")
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{r['Dag']}\n{r['Datum'].strftime('%d-%m') if not isinstance(r['Datum'], str) else r['Datum']}"
+                            for _, r in _plot_df.iterrows()])
+        ax.set_ylabel(y_label)
+        ax.set_title(titel)
+        ax.legend(loc="upper right", fontsize=8)
+        ax.grid(axis="y", linestyle=":", alpha=0.4)
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+
+    _draw_kpi_chart("Manuren per ton", "MANUREN / TON", get_norm_manuren_per_ton, "manuren/ton")
+    _draw_kpi_chart("Aantal traversen", "AANTAL TRAVERSEN", get_norm_traversen_per_dag, "traversen")
+    _draw_kpi_chart("Gemiddeld gewicht per traverse", "GEM GEWICHT PER TR", get_norm_gem_gewicht_per_traverse, "kg/traverse")
+
 
 with tab2:
     st.subheader("Gebruikte gegevens / controletabel")
