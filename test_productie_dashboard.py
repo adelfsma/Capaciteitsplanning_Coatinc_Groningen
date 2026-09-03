@@ -24,6 +24,7 @@ from shared import (  # noqa: E402
     MIS_KOLOMMEN,
     PRODUCTIE_DASHBOARD_KOLOMMEN,
     build_productie_dashboard_week,
+    build_productie_dashboard_ytd,
     _resolve_norm_op_datum,
     load_dashboard_manual,
 )
@@ -190,7 +191,66 @@ class TestBuildProductieDashboardWeek:
                 assert r["TONNAGE PLAN"] == 62000.0
 
 
-# ── Norm-getters ──────────────────────────────────────────────────────────────
+# ── build_productie_dashboard_ytd ─────────────────────────────────────────────
+
+class TestBuildProductieDashboardYtd:
+    """Controleer de YTD-aggregatie per ISO-week."""
+
+    def test_lege_input_geeft_leeg_frame(self):
+        result = build_productie_dashboard_ytd(pd.DataFrame(columns=MIS_KOLOMMEN), jaar=2026)
+        assert result.empty
+        assert list(result.columns) == [
+            "Weeknr", "Week_startdatum", "Werkelijk_kg_totaal",
+            "Manuren_per_ton_gewogen", "Traversen_totaal", "Gem_gewicht_per_traverse",
+        ]
+
+    def test_aggregatie_per_week(self):
+        # Week 35 (24-30 aug 2026): 3 dagen met data
+        mis_df = pd.DataFrame([
+            _mis_row("2026-08-24", kg=70000, manuurton=6.0, afkeur=100, traversen=70, m2trav=1000),
+            _mis_row("2026-08-25", kg=80000, manuurton=5.5, afkeur=200, traversen=80, m2trav=1000),
+            _mis_row("2026-08-26", kg=50000, manuurton=7.0, afkeur=50,  traversen=50, m2trav=1000),
+        ])
+        result = build_productie_dashboard_ytd(mis_df, jaar=2026)
+        # Alle drie in dezelfde week
+        assert len(result) == 1
+        row = result.iloc[0]
+        assert row["Weeknr"] == 35
+        assert row["Werkelijk_kg_totaal"] == 200000
+        assert row["Traversen_totaal"] == 200
+        # Gewogen gemiddelde: (70000*6 + 80000*5.5 + 50000*7) / 200000 = 6.05
+        assert abs(row["Manuren_per_ton_gewogen"] - 6.05) < 0.001
+        # Gem gewicht: 200000 / 200 = 1000
+        assert row["Gem_gewicht_per_traverse"] == 1000.0
+
+    def test_alleen_gevraagd_jaar(self):
+        # Let op: december-datums vanaf ~28e vallen ISO-technisch al in week 1
+        # van het volgende jaar. 15 dec zit gegarandeerd in ISO-jaar 2025.
+        mis_df = pd.DataFrame([
+            _mis_row("2025-12-15", kg=50000, manuurton=6.0, traversen=50),
+            _mis_row("2026-01-05", kg=60000, manuurton=6.0, traversen=60),
+        ])
+        result_2026 = build_productie_dashboard_ytd(mis_df, jaar=2026)
+        assert len(result_2026) == 1
+        assert result_2026.iloc[0]["Werkelijk_kg_totaal"] == 60000
+
+    def test_toekomstige_datums_worden_genegeerd(self):
+        # Datum in de toekomst
+        toekomst = pd.Timestamp(date.today()) + pd.Timedelta(days=30)
+        mis_df = pd.DataFrame([
+            _mis_row(toekomst, kg=10000, manuurton=6.0, traversen=10),
+        ])
+        result = build_productie_dashboard_ytd(mis_df, jaar=toekomst.year)
+        assert result.empty
+
+    def test_rijen_zonder_kg_worden_overgeslagen(self):
+        mis_df = pd.DataFrame([
+            _mis_row("2026-08-24", kg=None, manuurton=6.0, traversen=None),  # skip
+            _mis_row("2026-08-25", kg=80000, manuurton=5.5, traversen=80, m2trav=1000),
+        ])
+        result = build_productie_dashboard_ytd(mis_df, jaar=2026)
+        assert len(result) == 1
+        assert result.iloc[0]["Werkelijk_kg_totaal"] == 80000
 
 class TestNormResolver:
     """Controleer de fallback-volgorde: periode → scalar → default."""

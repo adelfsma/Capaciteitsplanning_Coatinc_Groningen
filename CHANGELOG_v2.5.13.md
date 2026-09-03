@@ -57,6 +57,9 @@ Fallback-volgorde: matchende periode → scalar → hardcoded default.
   MIS-load doet zelf een kolomcheck als tweede vangnet).
 - Nieuwe build-functie: `build_productie_dashboard_week(mis_df, dag_df, manual_dict, jaar,
   weeknr, feestdagen)` — retourneert een DataFrame met 7 rijen (ma t/m zo).
+- Nieuwe YTD-aggregatie: `build_productie_dashboard_ytd(mis_df, jaar)` — per ISO-week
+  totaal-KG, gewogen manuren/ton (weegfactor = KG), totaal traversen, gewogen gem
+  gewicht/traverse (som KG / som traversen). Alleen dagen met werkelijke productie.
 
 ### Wijzigingen `viewer_app.py`
 - Nieuwe imports voor de bovenstaande functies.
@@ -64,8 +67,18 @@ Fallback-volgorde: matchende periode → scalar → hardcoded default.
 - Nieuwe tab **"Productie dashboard"**:
   - Bovenaan: wachtwoord-beveiligde expander voor handmatige invoer per datum.
   - Week-selector (jaar + weeknr, default = huidige ISO-week).
-  - Twee tabellen naast elkaar: gekozen week + vorige week.
-  - Drie grafieken met normen-lijnen: manuren/ton, aantal traversen, gemiddeld gewicht.
+  - Weektabellen **onder elkaar** (gekozen week boven, vorige week onder) met
+    compacte kolomlabels (mu/ton, kg/trav., etc.) zodat de tabel binnen de
+    container past zonder horizontal scrollen.
+  - **Verfijnde grafieken** in matplotlib: subtiele grid, borderless, bold
+    titles left-aligned, waarde-labels bovenop de bars, y-as met 20% kopruimte
+    boven de max-waarde, gedashte norm-lijn, max ~10 x-tick labels om overlap
+    te voorkomen.
+  - **Sectie 1 — Verloop deze week (ma t/m vr):** drie grafieken naast elkaar
+    (manuren/ton, aantal traversen, gem gewicht/traverse).
+  - **Sectie 2 — Year to date (per week):** drie grafieken over het hele
+    gekozen jaar t/m vandaag. Manuren/ton en gem gewicht/traverse zijn gewogen
+    naar kg-productie per dag. Norm voor traversen = dagnorm × 5 werkdagen.
 
 ### `manager_app.py`
 - **Ongewijzigd.** MIS-upload verschijnt automatisch via `OPTIONAL_FILES`.

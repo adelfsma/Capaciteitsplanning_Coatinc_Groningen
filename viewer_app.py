@@ -22,6 +22,7 @@ from shared import (
     save_dashboard_manual_entry,
     build_dashboard_data,
     build_productie_dashboard_week,
+    build_productie_dashboard_ytd,
     compute_otif,
     get_peildatum_from_metadata,
     find_originele_leverdatum_column,
@@ -948,7 +949,7 @@ with tab_prod:
     # ── Handmatige invoer (wachtwoordbeveiligd) ────────────────────────────────
     with st.expander("🔒 Handmatige velden invoeren (beheer)"):
         pw = st.text_input("Beheerwachtwoord", type="password", key="prod_dashboard_pw")
-        if pw == "" :
+        if pw == "":
             st.caption("Vul het beheerwachtwoord in om handmatige velden op te slaan.")
         elif pw != get_beheer_wachtwoord():
             st.error("Onjuist wachtwoord.")
@@ -987,14 +988,29 @@ with tab_prod:
                 except Exception as e:
                     st.error(f"Opslaan mislukt: {e}")
 
-    # ── Weektabellen naast elkaar ──────────────────────────────────────────────
+    # ── Weektabellen onder elkaar (compact zodat ze passen zonder scrollen) ────
+    # Kortere kolomlabels + kleinere breedtes zodat de tabel binnen de container past.
+    _PROD_COL_CONFIG = {
+        "Dag":                    st.column_config.TextColumn("Dag",       width="small"),
+        "Datum":                  st.column_config.TextColumn("Datum",     width="small"),
+        "TONNAGE PLAN":           st.column_config.TextColumn("Plan (kg)", width="small"),
+        "TONNAGE WERKELIJK":      st.column_config.TextColumn("Werkelijk (kg)", width="small"),
+        "MANUREN / TON":          st.column_config.TextColumn("mu/ton",    width="small"),
+        "AFKEUR IN KG":           st.column_config.TextColumn("Afkeur (kg)", width="small"),
+        "AANTAL TRAVERSEN":       st.column_config.TextColumn("Trav.",     width="small"),
+        "GEM GEWICHT PER TR":     st.column_config.TextColumn("kg/trav.",  width="small"),
+        "AANTAL KLACHTEN":        st.column_config.TextColumn("Klachten",  width="small"),
+        "Storingstijd in min":    st.column_config.TextColumn("Storing (min)", width="small"),
+        "VEILIGHEIDSINCIDENTEN":  st.column_config.TextColumn("Veiligheid", width="small"),
+    }
+
     def _fmt_week_df(week_df: pd.DataFrame) -> pd.DataFrame:
-        """Format de tabel: datums als dd-mm, getallen met duizendtal-punt."""
+        """Format datums als dd-mm en getallen met NL duizendtal-punt."""
         out = week_df.copy()
         out["Datum"] = pd.to_datetime(out["Datum"]).dt.strftime("%d-%m")
-        int_cols = ["TONNAGE PLAN", "TONNAGE WERKELIJK", "AFKEUR IN KG", "AANTAL TRAVERSEN",
-                    "GEM GEWICHT PER TR", "AANTAL KLACHTEN", "Storingstijd in min",
-                    "VEILIGHEIDSINCIDENTEN"]
+        int_cols = ["TONNAGE PLAN", "TONNAGE WERKELIJK", "AFKEUR IN KG",
+                    "AANTAL TRAVERSEN", "GEM GEWICHT PER TR", "AANTAL KLACHTEN",
+                    "Storingstijd in min", "VEILIGHEIDSINCIDENTEN"]
         for c in int_cols:
             if c in out.columns:
                 out[c] = out[c].apply(lambda v: format_int(v) if pd.notna(v) else "")
@@ -1004,50 +1020,178 @@ with tab_prod:
             )
         return out
 
-    left, right = st.columns(2)
-    with left:
-        st.markdown(f"**Week {int(gekozen_week)} — huidige selectie**")
-        st.dataframe(_fmt_week_df(week_curr), width="stretch", hide_index=True)
-    with right:
-        st.markdown(f"**Week {int(_iso_prev.week)} — vorige week**")
-        st.dataframe(_fmt_week_df(week_prev), width="stretch", hide_index=True)
+    st.markdown(f"##### Week {int(gekozen_week)} — huidige selectie")
+    st.dataframe(
+        _fmt_week_df(week_curr),
+        width="stretch", hide_index=True,
+        column_config=_PROD_COL_CONFIG,
+    )
 
-    # ── Grafieken met normen-lijnen ────────────────────────────────────────────
-    st.markdown("### Verloop met normen (huidige selectie, ma t/m vr)")
+    st.markdown(f"##### Week {int(_iso_prev.week)} — vorige week")
+    st.dataframe(
+        _fmt_week_df(week_prev),
+        width="stretch", hide_index=True,
+        column_config=_PROD_COL_CONFIG,
+    )
 
-    # Alleen werkdagen met werkelijke MIS-data plotten voor helderheid
-    _plot_df = week_curr.head(5).copy()  # ma t/m vr
+    # ── Chart helpers (verfijnde stijl) ────────────────────────────────────────
+    # Kleuren afgestemd op de bestaande grafieken in de app (blauw voor werkelijk,
+    # subtiel rood voor de norm-lijn).
+    _KLEUR_WERKELIJK = "#2E75B6"
+    _KLEUR_NORM      = "#C00000"
+    _KLEUR_GRID      = "#E5E5E5"
+    _KLEUR_TEXT      = "#333333"
 
-    def _norm_series(getter, week_df: pd.DataFrame):
-        return [getter(d) for d in pd.to_datetime(week_df["Datum"])]
+    def _style_axis(ax):
+        """Uniforme, opgeruimde stijl voor alle KPI-grafieken."""
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color(_KLEUR_GRID)
+        ax.spines["bottom"].set_color(_KLEUR_GRID)
+        ax.tick_params(colors=_KLEUR_TEXT, labelsize=9)
+        ax.yaxis.grid(True, color=_KLEUR_GRID, linestyle="-", linewidth=0.6, alpha=0.7)
+        ax.set_axisbelow(True)
+        ax.title.set_color(_KLEUR_TEXT)
+        ax.title.set_fontsize(11)
+        ax.title.set_fontweight("semibold")
+        ax.title.set_loc = "left"
+        for spine in ax.spines.values():
+            spine.set_linewidth(0.8)
 
-    def _draw_kpi_chart(titel: str, kpi_col: str, norm_getter, y_label: str):
-        werkelijk = _plot_df[kpi_col].tolist()
-        # Als alles leeg is: helemaal geen grafiek tonen
-        if not any(pd.notna(v) for v in werkelijk):
-            st.info(f"Geen {kpi_col.lower()}-data beschikbaar in deze week.")
+    def _pad_ylim(ax, values, norm_values=None, extra=0.20, floor=0):
+        """Zet y-limits op basis van max-waarde met extra kopruimte."""
+        candidates = [v for v in values if v is not None and pd.notna(v) and v > 0]
+        if norm_values is not None:
+            candidates += [v for v in norm_values if v is not None and pd.notna(v) and v > 0]
+        if not candidates:
             return
-        norm_waarden = _norm_series(norm_getter, _plot_df)
-        fig, ax = plt.subplots(figsize=(8, 3))
-        x = np.arange(len(_plot_df))
-        ax.bar(x, [v if pd.notna(v) else 0 for v in werkelijk],
-               color="#2E75B6", label="Werkelijk", alpha=0.85)
-        ax.plot(x, norm_waarden, color="#C00000", marker="o",
-                linewidth=2, label="Norm")
-        ax.set_xticks(x)
-        ax.set_xticklabels([f"{r['Dag']}\n{r['Datum'].strftime('%d-%m') if not isinstance(r['Datum'], str) else r['Datum']}"
-                            for _, r in _plot_df.iterrows()])
-        ax.set_ylabel(y_label)
-        ax.set_title(titel)
-        ax.legend(loc="upper right", fontsize=8)
-        ax.grid(axis="y", linestyle=":", alpha=0.4)
-        fig.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
+        top = max(candidates) * (1 + extra)
+        ax.set_ylim(bottom=floor, top=top)
 
-    _draw_kpi_chart("Manuren per ton", "MANUREN / TON", get_norm_manuren_per_ton, "manuren/ton")
-    _draw_kpi_chart("Aantal traversen", "AANTAL TRAVERSEN", get_norm_traversen_per_dag, "traversen")
-    _draw_kpi_chart("Gemiddeld gewicht per traverse", "GEM GEWICHT PER TR", get_norm_gem_gewicht_per_traverse, "kg/traverse")
+    def _draw_week_chart(ax, plot_df, kpi_col, norm_getter, y_label, titel):
+        """Werkelijk als bars, norm als horizontale streepjeslijn, waarde-labels bovenop."""
+        werkelijk = plot_df[kpi_col].tolist()
+        if not any(pd.notna(v) and v > 0 for v in werkelijk):
+            ax.text(0.5, 0.5, "Geen data in deze week", ha="center", va="center",
+                    transform=ax.transAxes, color="#999", fontsize=10)
+            ax.set_axis_off()
+            ax.set_title(titel, loc="left", pad=10, color=_KLEUR_TEXT,
+                         fontsize=11, fontweight="semibold")
+            return
+        norm_waarden = [norm_getter(d) for d in pd.to_datetime(plot_df["Datum"])]
+        x = np.arange(len(plot_df))
+        bars = [v if pd.notna(v) else 0 for v in werkelijk]
+
+        ax.bar(x, bars, width=0.60, color=_KLEUR_WERKELIJK, alpha=0.90,
+               edgecolor="none", label="Werkelijk", zorder=2)
+        ax.plot(x, norm_waarden, color=_KLEUR_NORM, linestyle="--", linewidth=1.6,
+                marker="", label="Norm", zorder=3)
+
+        # Waarde-labels bovenaan iedere bar
+        for xi, v in zip(x, werkelijk):
+            if pd.notna(v) and v > 0:
+                label = f"{v:.1f}".replace(".", ",") if v < 100 else format_int(v)
+                ax.text(xi, v, label, ha="center", va="bottom", fontsize=8,
+                        color=_KLEUR_TEXT, zorder=4)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(
+            [f"{r['Dag']}\n{pd.to_datetime(r['Datum']).strftime('%d-%m')}"
+             for _, r in plot_df.iterrows()],
+            fontsize=9, color=_KLEUR_TEXT,
+        )
+        ax.set_ylabel(y_label, fontsize=9, color=_KLEUR_TEXT)
+        ax.legend(loc="upper right", fontsize=8, frameon=False)
+        _style_axis(ax)
+        _pad_ylim(ax, werkelijk, norm_waarden)
+        ax.set_title(titel, loc="left", pad=10, color=_KLEUR_TEXT,
+                     fontsize=11, fontweight="semibold")
+
+    def _draw_ytd_chart(ax, ytd_df, value_col, norm_getter, y_label, titel):
+        """YTD per ISO-week: werkelijk als bars, norm als lijn."""
+        if ytd_df.empty:
+            ax.text(0.5, 0.5, "Geen YTD-data beschikbaar", ha="center", va="center",
+                    transform=ax.transAxes, color="#999", fontsize=10)
+            ax.set_axis_off()
+            ax.set_title(titel, loc="left", pad=10, color=_KLEUR_TEXT,
+                         fontsize=11, fontweight="semibold")
+            return
+        weken = ytd_df["Weeknr"].tolist()
+        werkelijk = ytd_df[value_col].tolist()
+        norm_waarden = [norm_getter(d) for d in ytd_df["Week_startdatum"]]
+        x = np.arange(len(weken))
+
+        ax.bar(x, [v if pd.notna(v) else 0 for v in werkelijk],
+               width=0.75, color=_KLEUR_WERKELIJK, alpha=0.85,
+               edgecolor="none", label="Werkelijk", zorder=2)
+        ax.plot(x, norm_waarden, color=_KLEUR_NORM, linestyle="--", linewidth=1.6,
+                marker="", label="Norm", zorder=3)
+
+        # Tick spacing: max ~10 labels om overlap te voorkomen
+        step = 1 if len(weken) <= 10 else max(1, len(weken) // 10)
+        tick_idx = list(range(0, len(weken), step))
+        # Zorg dat de laatste week zichtbaar is — vervang de laatste als hij te
+        # dicht op de nieuwe laatste zou komen te staan, anders toevoegen.
+        last_i = len(weken) - 1
+        if tick_idx and tick_idx[-1] != last_i:
+            if last_i - tick_idx[-1] < step:
+                tick_idx[-1] = last_i
+            else:
+                tick_idx.append(last_i)
+        ax.set_xticks(tick_idx)
+        ax.set_xticklabels([f"w{weken[i]}" for i in tick_idx],
+                           fontsize=9, color=_KLEUR_TEXT)
+        ax.set_ylabel(y_label, fontsize=9, color=_KLEUR_TEXT)
+        ax.legend(loc="upper right", fontsize=8, frameon=False)
+        _style_axis(ax)
+        _pad_ylim(ax, werkelijk, norm_waarden)
+        ax.set_title(titel, loc="left", pad=10, color=_KLEUR_TEXT,
+                     fontsize=11, fontweight="semibold")
+
+    # ── Week-grafieken (huidige selectie, ma t/m vr) ───────────────────────────
+    st.markdown("### Verloop deze week (ma t/m vr)")
+    _plot_week = week_curr.head(5).copy()
+
+    fig_w, axes_w = plt.subplots(1, 3, figsize=(15, 3.6), dpi=110)
+    fig_w.patch.set_facecolor("white")
+    _draw_week_chart(axes_w[0], _plot_week, "MANUREN / TON",
+                     get_norm_manuren_per_ton, "manuren / ton",
+                     "Manuren per ton")
+    _draw_week_chart(axes_w[1], _plot_week, "AANTAL TRAVERSEN",
+                     get_norm_traversen_per_dag, "traversen",
+                     "Aantal traversen")
+    _draw_week_chart(axes_w[2], _plot_week, "GEM GEWICHT PER TR",
+                     get_norm_gem_gewicht_per_traverse, "kg / traverse",
+                     "Gemiddeld gewicht per traverse")
+    fig_w.tight_layout()
+    st.pyplot(fig_w)
+    plt.close(fig_w)
+
+    # ── YTD-grafieken (per ISO-week van gekozen jaar) ──────────────────────────
+    st.markdown(f"### Year to date ({int(gekozen_jaar)}, per week)")
+    ytd_df = build_productie_dashboard_ytd(mis_df, int(gekozen_jaar))
+    if ytd_df.empty:
+        st.info("Nog geen YTD-data voor dit jaar beschikbaar.")
+    else:
+        fig_y, axes_y = plt.subplots(1, 3, figsize=(15, 3.6), dpi=110)
+        fig_y.patch.set_facecolor("white")
+        _draw_ytd_chart(axes_y[0], ytd_df, "Manuren_per_ton_gewogen",
+                        get_norm_manuren_per_ton, "manuren / ton",
+                        "Manuren per ton (gewogen)")
+        _draw_ytd_chart(axes_y[1], ytd_df, "Traversen_totaal",
+                        lambda d: get_norm_traversen_per_dag(d) * 5,
+                        "traversen / week",
+                        "Aantal traversen per week")
+        _draw_ytd_chart(axes_y[2], ytd_df, "Gem_gewicht_per_traverse",
+                        get_norm_gem_gewicht_per_traverse, "kg / traverse",
+                        "Gemiddeld gewicht per traverse")
+        fig_y.tight_layout()
+        st.pyplot(fig_y)
+        plt.close(fig_y)
+        st.caption(
+            "YTD-aggregatie: manuren/ton en gem gewicht/traverse zijn gewogen naar "
+            "kg-productie per dag. Norm voor traversen is dag-norm × 5 werkdagen."
+        )
 
 
 with tab2:

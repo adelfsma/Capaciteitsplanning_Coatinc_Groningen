@@ -1741,6 +1741,67 @@ def build_productie_dashboard_week(
     return pd.DataFrame(rows, columns=PRODUCTIE_DASHBOARD_KOLOMMEN)
 
 
+def build_productie_dashboard_ytd(mis_df: pd.DataFrame, jaar: int) -> pd.DataFrame:
+    """Aggregeer MIS-data per ISO-week voor het gegeven jaar (t/m vandaag).
+
+    Retourneert DataFrame met kolommen:
+      Weeknr, Week_startdatum, Werkelijk_kg_totaal, Manuren_per_ton_gewogen,
+      Traversen_totaal, Gem_gewicht_per_traverse
+
+    Aggregatie-regels:
+      - Werkelijk kg: som van KG per week.
+      - Manuren/ton: gewogen gemiddelde met KG als gewicht
+        (som(ManuurTon * KG) / som(KG)). Rijen zonder KG worden overgeslagen.
+      - Traversen: som per week.
+      - Gem gewicht/traverse: som(KG) / som(Traversen) per week (gewogen).
+    """
+    empty_cols = [
+        "Weeknr", "Week_startdatum", "Werkelijk_kg_totaal",
+        "Manuren_per_ton_gewogen", "Traversen_totaal", "Gem_gewicht_per_traverse",
+    ]
+    if mis_df is None or mis_df.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    df = mis_df.copy()
+    df["Datum"] = pd.to_datetime(df["Datum"], errors="coerce")
+    df = df.dropna(subset=["Datum"])
+
+    today = pd.Timestamp(date.today()).normalize()
+    iso = df["Datum"].dt.isocalendar()
+    df["Jaar_iso"] = iso.year.astype(int)
+    df["Weeknr"]   = iso.week.astype(int)
+    df = df[(df["Jaar_iso"] == int(jaar)) & (df["Datum"] <= today)]
+
+    # Alleen rijen met werkelijke productie meenemen
+    df = df[df["KG"].notna() & (df["KG"] > 0)]
+    if df.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    df["ManuurTon_x_KG"] = df["ManuurTon"].fillna(0) * df["KG"]
+
+    grouped = df.groupby(["Jaar_iso", "Weeknr"], as_index=False).agg(
+        Werkelijk_kg_totaal=("KG", "sum"),
+        ManuurTon_x_KG_sum=("ManuurTon_x_KG", "sum"),
+        Traversen_totaal=("Traverses", "sum"),
+    )
+    grouped["Manuren_per_ton_gewogen"] = np.where(
+        grouped["Werkelijk_kg_totaal"] > 0,
+        grouped["ManuurTon_x_KG_sum"] / grouped["Werkelijk_kg_totaal"],
+        np.nan,
+    )
+    grouped["Gem_gewicht_per_traverse"] = np.where(
+        grouped["Traversen_totaal"] > 0,
+        grouped["Werkelijk_kg_totaal"] / grouped["Traversen_totaal"],
+        np.nan,
+    )
+    grouped = grouped.sort_values(["Jaar_iso", "Weeknr"]).reset_index(drop=True)
+    grouped["Week_startdatum"] = grouped.apply(
+        lambda r: pd.Timestamp.fromisocalendar(int(r["Jaar_iso"]), int(r["Weeknr"]), 1),
+        axis=1,
+    )
+    return grouped[empty_cols]
+
+
 # ── OTIF helpers (KPI: percentage orders op tijd gereed) ──────────────────────
 
 def map_otif_status(status) -> str:
