@@ -923,11 +923,12 @@ with tab_prod:
     # Week-selector: huidige ISO-week als default
     _today = pd.Timestamp(date.today()).normalize()
     _iso_now = _today.isocalendar()
-    prod_col_l, prod_col_r = st.columns([1, 3])
-    with prod_col_l:
+    c_year, c_week, _c_spacer = st.columns([1, 1, 4])
+    with c_year:
         gekozen_jaar = st.number_input(
             "Jaar", min_value=2024, max_value=2099, value=int(_iso_now.year), step=1
         )
+    with c_week:
         gekozen_week = st.number_input(
             "Weeknummer", min_value=1, max_value=53, value=int(_iso_now.week), step=1
         )
@@ -1058,8 +1059,9 @@ with tab_prod:
         for spine in ax.spines.values():
             spine.set_linewidth(0.8)
 
-    def _pad_ylim(ax, values, norm_values=None, extra=0.20, floor=0):
-        """Zet y-limits op basis van max-waarde met extra kopruimte."""
+    def _pad_ylim(ax, values, norm_values=None, extra=0.35, floor=0):
+        """Zet y-limits op basis van max-waarde met extra kopruimte.
+        35% padding voorkomt dat de legenda over de hoge bars valt."""
         candidates = [v for v in values if v is not None and pd.notna(v) and v > 0]
         if norm_values is not None:
             candidates += [v for v in norm_values if v is not None and pd.notna(v) and v > 0]
