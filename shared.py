@@ -140,14 +140,14 @@ OTIF_STATUS_MAP = {
     "afgehaald":                 "Ja",
     "coat gereed":               "Ja",
     "ub v gereed":               "Ja",
-    "pc afgehaald":              "Nvt",
+    "pc afgehaald":              "Ja",
+    "pc opgehangen":             "Ja",   # poedercoat hangt al aan het rek → telt als op tijd
     "productie gereed":          "Nee",
     "geblokkeerd":               "Nee",
     "opgehangen":                "Nee",
-    "pc opgehangen":             "Nee",
-    "ub":                        "Nee",
+    "ub":                        "ja",
     "nabewerking nog uitvoeren": "Nee",
-    "meetrapport":               "Nee",
+    "meetrapport":               "ja",
 }
 
 # Drempels voor de OTIF-snelheidsmeter in het dashboard.

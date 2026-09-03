@@ -211,6 +211,8 @@ if publish:
                         )
                     elif not _snap_saved:
                         st.caption("ℹ️ Er bestaat al een OTIF-snapshot voor vandaag — niet overschreven.")
+                    else:
+                        st.caption("ℹ️ Geen OTIF-snapshot — orderbestanden niet aanwezig in deze publicatie.")
                 except Exception as _snap_err:
                     st.warning(
                         f"⚠️ Publicatie geslaagd, maar OTIF-snapshot kon niet worden opgeslagen: "
