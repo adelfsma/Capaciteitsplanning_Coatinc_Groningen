@@ -20,6 +20,9 @@ from shared import (
     load_mis_data,
     load_dashboard_manual,
     save_dashboard_manual_entry,
+    load_daily_snapshots,
+    save_daily_snapshot,
+    build_otif_trend_df,
     build_dashboard_data,
     build_productie_dashboard_week,
     build_productie_dashboard_ytd,
@@ -908,11 +911,11 @@ with tab1:
 with tab_prod:
     st.subheader("Productie dashboard")
     st.caption(
-        "KPI-overzicht per week (bron: MIS-export + capaciteitsplanning). "
-        "Historische plan-waarden komen beschikbaar in een volgende versie."
+        "KPI-overzicht per week (bron: MIS-export + capaciteitsplanning + "
+        "daily snapshots voor historische plan-waarden)."
     )
 
-    # MIS-data en handmatige invoer laden
+    # MIS-data, handmatige invoer en snapshot-historie laden
     try:
         mis_df = load_mis_data()
     except Exception as e:
@@ -920,6 +923,7 @@ with tab_prod:
         mis_df = pd.DataFrame()
 
     manual_dict = load_dashboard_manual()
+    snapshots = load_daily_snapshots()
 
     if mis_df.empty:
         st.warning(
@@ -949,9 +953,11 @@ with tab_prod:
 
     week_curr = build_productie_dashboard_week(
         mis_df, dag, manual_dict, int(gekozen_jaar), int(gekozen_week), _feest_set,
+        snapshots=snapshots,
     )
     week_prev = build_productie_dashboard_week(
         mis_df, dag, manual_dict, int(_iso_prev.year), int(_iso_prev.week), _feest_set,
+        snapshots=snapshots,
     )
 
     # ── Handmatige invoer (wachtwoordbeveiligd) ────────────────────────────────
@@ -995,6 +1001,47 @@ with tab_prod:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Opslaan mislukt: {e}")
+
+            st.markdown("---")
+            st.markdown("**Snapshot backfill** (voor gemiste dagen)")
+            st.caption(
+                "Slaat een snapshot op met de HUIDIGE plan- en OTIF-berekening onder "
+                "de gekozen datum. Alleen gebruiken voor dagen waarop de app niet is "
+                "geopend — de waarden zijn per definitie minder accuraat dan een "
+                "on-the-day snapshot en worden gemarkeerd als 'backfilled'."
+            )
+            bc1, bc2 = st.columns([2, 1])
+            with bc1:
+                bf_datum = st.date_input(
+                    "Backfill-datum",
+                    value=otif_peildatum,
+                    key="prod_dashboard_backfill_datum",
+                )
+            with bc2:
+                bf_overwrite = st.checkbox("Overschrijf bestaand", value=False,
+                                            key="prod_dashboard_backfill_overwrite")
+            if st.button("Backfill snapshot"):
+                try:
+                    _bf_plan_kg = None
+                    if not dag.empty and "Verzinkdatum" in dag.columns:
+                        _bf_match = dag[pd.to_datetime(dag["Verzinkdatum"]).dt.normalize()
+                                        == pd.Timestamp(bf_datum).normalize()]
+                        if not _bf_match.empty:
+                            _bf_plan_kg = float(_bf_match.iloc[0].get("Gewicht_kg", 0) or 0)
+                    _bf_saved = save_daily_snapshot(
+                        bf_datum, _bf_plan_kg, otif_result,
+                        overwrite=bf_overwrite, backfilled=True,
+                    )
+                    if _bf_saved:
+                        st.success(f"✅ Snapshot opgeslagen voor {bf_datum.strftime('%d-%m-%Y')}.")
+                        st.rerun()
+                    else:
+                        st.info(
+                            f"Er bestaat al een snapshot voor {bf_datum.strftime('%d-%m-%Y')}. "
+                            "Vink 'Overschrijf bestaand' aan om die te vervangen."
+                        )
+                except Exception as e:
+                    st.error(f"Backfill mislukt: {e}")
 
     # ── Weektabellen onder elkaar (compact zodat ze passen zonder scrollen) ────
     # Kortere kolomlabels + kleinere breedtes zodat de tabel binnen de container past.
@@ -1220,6 +1267,75 @@ with tab_prod:
             "YTD-aggregatie: manuren/ton en gem gewicht/traverse zijn gewogen naar "
             "kg-productie per dag. Norm voor traversen is dag-norm × 5 werkdagen."
         )
+
+    # ── OTIF-trend (uit snapshot-historie) ─────────────────────────────────────
+    st.markdown("### OTIF-trend")
+    trend_col_l, trend_col_r = st.columns([1, 5])
+    with trend_col_l:
+        _trend_periode = st.selectbox(
+            "Periode",
+            options=[30, 60, 90, 180, 365],
+            index=2,  # default 90 dagen
+            format_func=lambda n: f"laatste {n} dagen",
+            key="prod_dashboard_trend_periode",
+        )
+    trend_df = build_otif_trend_df(snapshots, days_back=int(_trend_periode))
+
+    if trend_df.empty:
+        st.info(
+            "Nog geen OTIF-historie beschikbaar. Snapshots worden automatisch "
+            "opgebouwd zodra de app dagelijks wordt geopend. Bestaande historie "
+            "kan handmatig aangevuld worden via 'Backfill snapshot' in de "
+            "beheer-expander hierboven."
+        )
+    else:
+        fig_t, ax_t = plt.subplots(figsize=(15, 3.4), dpi=110)
+        fig_t.patch.set_facecolor("white")
+        x = np.arange(len(trend_df))
+        pcts = trend_df["OTIF_pct"].tolist()
+        # Aparte kleur voor backfilled punten
+        colors = ["#F59E0B" if bf else _KLEUR_WERKELIJK
+                  for bf in trend_df["Backfilled"].tolist()]
+        ax_t.plot(x, pcts, color=_KLEUR_WERKELIJK, linewidth=1.6,
+                  marker="", label="OTIF %", zorder=2)
+        ax_t.scatter(x, pcts, c=colors, s=22, zorder=3, edgecolor="white", linewidth=0.6)
+        # Norm-lijnen (OTIF thresholds)
+        ax_t.axhline(y=OTIF_GAUGE_GREEN_THRESHOLD, color="#2E9E4B", linestyle=":",
+                     linewidth=1.2, alpha=0.7, label=f"Groen ≥ {int(OTIF_GAUGE_GREEN_THRESHOLD)}%")
+        ax_t.axhline(y=OTIF_GAUGE_ORANGE_THRESHOLD, color="#C77A00", linestyle=":",
+                     linewidth=1.2, alpha=0.7, label=f"Oranje ≥ {int(OTIF_GAUGE_ORANGE_THRESHOLD)}%")
+
+        # X-as ticks: max ~10 datum-labels
+        n = len(trend_df)
+        step = 1 if n <= 10 else max(1, n // 10)
+        tick_idx = list(range(0, n, step))
+        if tick_idx and tick_idx[-1] != n - 1:
+            if (n - 1) - tick_idx[-1] < step:
+                tick_idx[-1] = n - 1
+            else:
+                tick_idx.append(n - 1)
+        ax_t.set_xticks(tick_idx)
+        ax_t.set_xticklabels(
+            [trend_df.iloc[i]["Datum"].strftime("%d-%m") for i in tick_idx],
+            fontsize=9, color=_KLEUR_TEXT,
+        )
+        ax_t.set_ylabel("OTIF %", fontsize=9, color=_KLEUR_TEXT)
+        ax_t.set_ylim(0, 105)
+        ax_t.legend(loc="lower left", fontsize=8, frameon=False, ncol=3)
+        _style_axis(ax_t)
+        ax_t.set_title(f"OTIF over de laatste {int(_trend_periode)} dagen",
+                       loc="left", pad=10, color=_KLEUR_TEXT,
+                       fontsize=11, fontweight="semibold")
+        fig_t.tight_layout()
+        st.pyplot(fig_t)
+        plt.close(fig_t)
+
+        n_backfilled = int(trend_df["Backfilled"].sum())
+        if n_backfilled:
+            st.caption(
+                f"Oranje punten zijn backfilled snapshots ({n_backfilled} van {len(trend_df)}) "
+                "— die zijn achteraf gemaakt en minder accuraat dan on-the-day snapshots."
+            )
 
 
 with tab2:

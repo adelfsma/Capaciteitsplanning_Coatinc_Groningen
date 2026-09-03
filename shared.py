@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.13"
+APP_VERSION = "v2.5.14"
 
 
 def get_app_environment() -> str:
@@ -630,6 +630,133 @@ def save_dashboard_manual_entry(
     except AttributeError:
         # Kan alleen gebeuren in test-context zonder Streamlit runtime.
         pass
+
+
+# ── Daily snapshots (TONNAGE PLAN + OTIF-historie) ────────────────────────────
+
+SNAPSHOT_HISTORY_FILE = "daily_snapshot_history.json"
+SNAPSHOT_RETENTION_DAYS = 365
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_daily_snapshots() -> dict:
+    """Laad de daily-snapshot historie uit de bucket.
+
+    Structuur:
+      {
+        "YYYY-MM-DD": {
+          "tonnage_plan_kg": <float>,
+          "otif_pct": <float|null>,
+          "otif_totaal": <int>,
+          "otif_gereed": <int>,
+          "otif_niet_gereed": <int>,
+          "created_at": "<ISO-timestamp>",
+          "backfilled": <bool>
+        }
+      }
+    Ontbreekt of corrupt → leeg dict. Gecached met TTL 60s en automatisch
+    geinvalideerd na save_daily_snapshot()."""
+    try:
+        data = download_file(SNAPSHOT_HISTORY_FILE)
+        loaded = json.loads(data.decode("utf-8"))
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_daily_snapshot(
+    datum,
+    tonnage_plan_kg: float | None,
+    otif_result: dict | None,
+    overwrite: bool = False,
+    backfilled: bool = False,
+) -> bool:
+    """Sla een snapshot op voor 'datum' in de bucket.
+
+    Retourneert True als er iets geschreven is, False als de entry al bestond
+    en overwrite=False. Bewaart de OTIF-tellers zodat later andere metrics
+    afgeleid kunnen worden. Snoeit automatisch entries ouder dan
+    SNAPSHOT_RETENTION_DAYS.
+
+    De 'backfilled' vlag markeert een handmatig aangemaakte snapshot (bijv.
+    voor een dag waarop de app niet is geopend); die zijn per definitie
+    minder accuraat dan de op-de-dag zelf gemaakte snapshots.
+    """
+    from datetime import datetime as _dt
+
+    key = pd.Timestamp(datum).strftime("%Y-%m-%d")
+    current = load_daily_snapshots()
+
+    if key in current and not overwrite:
+        return False
+
+    def _num(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    otif = otif_result or {}
+    current[key] = {
+        "tonnage_plan_kg": _num(tonnage_plan_kg),
+        "otif_pct": _num(otif.get("otif_pct")),
+        "otif_totaal": int(otif.get("totaal", 0) or 0),
+        "otif_gereed": int(otif.get("gereed", 0) or 0),
+        "otif_niet_gereed": int(otif.get("niet_gereed", 0) or 0),
+        "created_at": _dt.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "backfilled": bool(backfilled),
+    }
+
+    # Snoei entries ouder dan de retentiegrens
+    cutoff = pd.Timestamp(date.today()) - pd.Timedelta(days=SNAPSHOT_RETENTION_DAYS)
+    pruned = {
+        k: v for k, v in current.items()
+        if pd.Timestamp(k) >= cutoff
+    }
+
+    upload_file(
+        SNAPSHOT_HISTORY_FILE,
+        json.dumps(pruned, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+    )
+    try:
+        load_daily_snapshots.clear()
+    except AttributeError:
+        pass
+    return True
+
+
+def build_otif_trend_df(snapshots: dict, days_back: int = 90) -> pd.DataFrame:
+    """Bouw een DataFrame voor de OTIF-trendgrafiek uit de snapshot-historie.
+
+    Retourneert kolommen: Datum, OTIF_pct, Aantal_orders, Backfilled.
+    Sorteert oplopend op datum en filtert op de laatste 'days_back' dagen.
+    Entries zonder OTIF-percentage (bijv. dagen zonder orders) worden
+    overgeslagen zodat de lijn niet naar 0 duikt.
+    """
+    if not snapshots:
+        return pd.DataFrame(columns=["Datum", "OTIF_pct", "Aantal_orders", "Backfilled"])
+
+    cutoff = pd.Timestamp(date.today()) - pd.Timedelta(days=int(days_back))
+    rows = []
+    for key, entry in snapshots.items():
+        try:
+            d = pd.Timestamp(key)
+        except (TypeError, ValueError):
+            continue
+        if d < cutoff:
+            continue
+        pct = entry.get("otif_pct")
+        if pct is None:
+            continue
+        rows.append({
+            "Datum": d,
+            "OTIF_pct": float(pct),
+            "Aantal_orders": int(entry.get("otif_totaal", 0) or 0),
+            "Backfilled": bool(entry.get("backfilled", False)),
+        })
+    if not rows:
+        return pd.DataFrame(columns=["Datum", "OTIF_pct", "Aantal_orders", "Backfilled"])
+    return pd.DataFrame(rows).sort_values("Datum").reset_index(drop=True)
 
 
 # ── Validation helpers (work on any Path folder) ───────────────────────────────
@@ -1669,16 +1796,19 @@ def build_productie_dashboard_week(
     jaar: int,
     weeknr: int,
     feestdagen: set | frozenset | None = None,
+    snapshots: dict | None = None,
 ) -> pd.DataFrame:
     """Bouw de KPI-tabel voor één ISO-week (7 rijen ma t/m zo).
 
     Bronnen:
       - mis_df: cumulatieve MIS-export (kolommen zoals in MIS_KOLOMMEN).
       - dag_df: uit build_dashboard_data() — Verzinkdatum + Gewicht_kg per dag.
-        Deze levert TONNAGE PLAN voor peildatum en verder. Voor dagen vóór
-        vandaag blijft TONNAGE PLAN leeg (accurate historische plan-waarden
-        komen pas in iteratie 2 via daily snapshots).
+        Levert TONNAGE PLAN voor peildatum en verder.
       - manual_dict: uit load_dashboard_manual().
+      - snapshots: uit load_daily_snapshots(). Levert TONNAGE PLAN voor
+        historische dagen. Ontbreekt de snapshot voor een historische dag,
+        dan blijft TONNAGE PLAN leeg voor die dag (geen misleidende
+        actualisering).
       - feestdagen: set van datums die als sluiting gelden.
 
     Weekend en feestdagen krijgen alle KPI-velden None, tenzij er MIS-data
@@ -1728,10 +1858,17 @@ def build_productie_dashboard_week(
             rows.append(row)
             continue
 
-        # TONNAGE PLAN: alleen betrouwbaar voor vandaag & toekomst in iteratie 1.
-        # Historische plan-waarden worden pas correct getoond nadat de daily
-        # snapshot (iteratie 2) is uitgerold.
-        row["TONNAGE PLAN"] = plan_by_date.get(d_norm) if d_norm >= today_norm else None
+        # TONNAGE PLAN:
+        #   - vandaag en verder: uit dag_df (actuele berekening)
+        #   - historisch: uit snapshot als beschikbaar, anders leeg
+        if d_norm >= today_norm:
+            row["TONNAGE PLAN"] = plan_by_date.get(d_norm)
+        else:
+            snap_key = d_norm.strftime("%Y-%m-%d")
+            snap = (snapshots or {}).get(snap_key)
+            row["TONNAGE PLAN"] = float(snap["tonnage_plan_kg"]) if (
+                snap and snap.get("tonnage_plan_kg") is not None
+            ) else None
 
         # MIS-velden
         if mis_row is not None:
@@ -1908,6 +2045,78 @@ def _empty_otif_result(peildatum, date_column: str, date_column_label: str) -> d
         "aantal_klant_uitgesloten": 0,
         "orders": pd.DataFrame(),
     }
+
+
+def compute_otif_from_folder(tmp_dir: Path) -> dict | None:
+    """Bereken de OTIF vanuit een al-gevulde temp-folder (zoals in de manager).
+
+    Gebruikt dezelfde parameters als compute_otif() maar leest de bestanden
+    uit tmp_dir in plaats van uit de cloud. Bedoeld om direct na publicatie
+    een OTIF-snapshot op te slaan op het moment van de export — het enige
+    betrouwbare moment waarop de status van de orders exact is zoals die dag
+    werkelijk was.
+
+    Retourneert het compute_otif-resultaat dict, of None als de benodigde
+    bestanden ontbreken of de berekening mislukt (zodat de aanroeper dit
+    als een zacht falen kan behandelen zonder de publicatie te blokkeren).
+    """
+    try:
+        order_file = None
+        for candidate in ("OrderExport2G.xlsx",):
+            if (tmp_dir / candidate).exists():
+                order_file = candidate
+                break
+        if order_file is None:
+            return None
+
+        export_files = [
+            "Export-1.xlsx", "Export.xlsx",
+            "Export+1.xlsx", "Export+2.xlsx", "Export+3.xlsx", "Export+4.xlsx",
+        ]
+        frames = []
+        for fname in export_files:
+            p = tmp_dir / fname
+            if p.exists():
+                try:
+                    frames.append(pd.read_excel(p))
+                except Exception:
+                    pass
+
+        order_df = pd.read_excel(tmp_dir / order_file)
+        merged = pd.concat([order_df] + frames, ignore_index=True) if frames else order_df.copy()
+
+        # Basiskolommen die compute_otif nodig heeft
+        if "Leverdatum" not in merged.columns:
+            return None
+        merged["Leverdatum"] = pd.to_datetime(merged["Leverdatum"], errors="coerce")
+        if "Status" not in merged.columns:
+            return None
+
+        # Verzinkstatus afleiden voor UB-uitsluiting (zelfde als in load_published_data)
+        merged["Verzinkstatus"] = merged["Status"].map(STATUS_MAP)
+
+        # Feestdagen
+        holiday_dates: set = set()
+        feest_path = tmp_dir / "feestdagen.xlsx"
+        if feest_path.exists():
+            try:
+                hdf = pd.read_excel(feest_path)
+                hdf["Datum"] = pd.to_datetime(hdf["Datum"], errors="coerce")
+                holiday_dates = set(hdf["Datum"].dropna().tolist())
+            except Exception:
+                pass
+
+        peildatum = date.today()
+        return compute_otif(
+            merged,
+            peildatum=peildatum,
+            holiday_dates=holiday_dates,
+            poetsen_afgehaald_niet_ok=get_poetsen_otif_actief(),
+            uitsluiten_statussen=get_otif_uitsluiten_statussen(),
+            uitsluiten_klanten=get_otif_uitsluiten_klanten(),
+        )
+    except Exception:
+        return None
 
 
 @st.cache_data(show_spinner=False)

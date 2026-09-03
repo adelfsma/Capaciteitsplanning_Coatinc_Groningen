@@ -23,11 +23,15 @@ sys.path.insert(0, str(Path(__file__).parent))
 from shared import (  # noqa: E402
     MIS_KOLOMMEN,
     PRODUCTIE_DASHBOARD_KOLOMMEN,
+    SNAPSHOT_RETENTION_DAYS,
     build_productie_dashboard_week,
     build_productie_dashboard_ytd,
+    build_otif_trend_df,
     _resolve_norm_op_datum,
     load_dashboard_manual,
     load_mis_data,
+    load_daily_snapshots,
+    save_daily_snapshot,
 )
 
 
@@ -36,7 +40,7 @@ def _clear_streamlit_cache():
     """Zorg dat elke test met een leeg cache begint. Nodig omdat de load- en
     build-functies met @st.cache_data zijn gedecoreerd; zonder clear zouden
     mock-patches in opvolgende tests een cache-hit teruggeven."""
-    for fn in (load_dashboard_manual, load_mis_data,
+    for fn in (load_dashboard_manual, load_mis_data, load_daily_snapshots,
                build_productie_dashboard_week, build_productie_dashboard_ytd):
         try:
             fn.clear()
@@ -325,3 +329,169 @@ class TestLoadDashboardManual:
         payload = {"2026-08-27": {"klachten": 1, "storingstijd_min": 10, "veiligheidsincidenten": 0}}
         with patch("shared.download_file", return_value=json.dumps(payload).encode("utf-8")):
             assert load_dashboard_manual() == payload
+
+
+# ── Daily snapshots ───────────────────────────────────────────────────────────
+
+class TestSaveDailySnapshot:
+    """Controleer save-gedrag: overwrite, backfilled-vlag, retentie."""
+
+    def test_save_nieuwe_datum_retourneert_true(self):
+        with patch("shared.download_file", side_effect=Exception("not found")), \
+             patch("shared.upload_file") as m_upload:
+            otif = {"otif_pct": 85.0, "totaal": 40, "gereed": 34, "niet_gereed": 6}
+            saved = save_daily_snapshot(date(2026, 8, 25), 55000, otif)
+            assert saved is True
+            assert m_upload.called
+            # De payload naar upload moet de nieuwe entry bevatten
+            _fname, data = m_upload.call_args[0]
+            body = json.loads(data.decode("utf-8"))
+            assert "2026-08-25" in body
+            entry = body["2026-08-25"]
+            assert entry["tonnage_plan_kg"] == 55000.0
+            assert entry["otif_pct"] == 85.0
+            assert entry["otif_totaal"] == 40
+            assert entry["backfilled"] is False
+
+    def test_save_bestaande_datum_zonder_overwrite_retourneert_false(self):
+        existing = {"2026-08-25": {"tonnage_plan_kg": 55000, "otif_pct": 85.0,
+                                     "otif_totaal": 40, "otif_gereed": 34,
+                                     "otif_niet_gereed": 6, "created_at": "2026-08-26T08:00:00",
+                                     "backfilled": False}}
+        with patch("shared.download_file", return_value=json.dumps(existing).encode("utf-8")), \
+             patch("shared.upload_file") as m_upload:
+            saved = save_daily_snapshot(date(2026, 8, 25), 60000, {"otif_pct": 90}, overwrite=False)
+            assert saved is False
+            assert not m_upload.called
+
+    def test_save_met_overwrite_vervangt_bestaande_entry(self):
+        existing = {"2026-08-25": {"tonnage_plan_kg": 55000, "otif_pct": 85.0,
+                                     "otif_totaal": 40, "otif_gereed": 34,
+                                     "otif_niet_gereed": 6, "created_at": "2026-08-26T08:00:00",
+                                     "backfilled": False}}
+        with patch("shared.download_file", return_value=json.dumps(existing).encode("utf-8")), \
+             patch("shared.upload_file") as m_upload:
+            saved = save_daily_snapshot(date(2026, 8, 25), 60000,
+                                          {"otif_pct": 90, "totaal": 45, "gereed": 41, "niet_gereed": 4},
+                                          overwrite=True, backfilled=True)
+            assert saved is True
+            body = json.loads(m_upload.call_args[0][1].decode("utf-8"))
+            entry = body["2026-08-25"]
+            assert entry["tonnage_plan_kg"] == 60000.0
+            assert entry["otif_pct"] == 90.0
+            assert entry["backfilled"] is True
+
+    def test_retentie_verwijdert_oude_entries(self):
+        oud = (pd.Timestamp(date.today()) - pd.Timedelta(days=SNAPSHOT_RETENTION_DAYS + 10)).strftime("%Y-%m-%d")
+        recent = (pd.Timestamp(date.today()) - pd.Timedelta(days=5)).strftime("%Y-%m-%d")
+        existing = {
+            oud:    {"tonnage_plan_kg": 1, "otif_pct": 50, "otif_totaal": 1, "otif_gereed": 0,
+                     "otif_niet_gereed": 1, "created_at": "old", "backfilled": False},
+            recent: {"tonnage_plan_kg": 2, "otif_pct": 80, "otif_totaal": 2, "otif_gereed": 1,
+                     "otif_niet_gereed": 1, "created_at": "recent", "backfilled": False},
+        }
+        with patch("shared.download_file", return_value=json.dumps(existing).encode("utf-8")), \
+             patch("shared.upload_file") as m_upload:
+            save_daily_snapshot(date.today(), 5000, {"otif_pct": 90})
+            body = json.loads(m_upload.call_args[0][1].decode("utf-8"))
+            assert oud not in body, "Oude entry buiten retentie zou weg moeten"
+            assert recent in body, "Recente entry moet blijven"
+            assert date.today().strftime("%Y-%m-%d") in body
+
+
+class TestBuildOtifTrendDf:
+    """Controleer de trend-DataFrame voor de grafiek."""
+
+    def test_leeg_snapshots_geeft_leeg_frame(self):
+        result = build_otif_trend_df({})
+        assert result.empty
+        assert list(result.columns) == ["Datum", "OTIF_pct", "Aantal_orders", "Backfilled"]
+
+    def test_entries_zonder_otif_pct_worden_overgeslagen(self):
+        snaps = {
+            "2026-08-25": {"tonnage_plan_kg": 50000, "otif_pct": None, "otif_totaal": 0,
+                           "otif_gereed": 0, "otif_niet_gereed": 0, "created_at": "x", "backfilled": False},
+            "2026-08-26": {"tonnage_plan_kg": 60000, "otif_pct": 85.0, "otif_totaal": 40,
+                           "otif_gereed": 34, "otif_niet_gereed": 6, "created_at": "x", "backfilled": False},
+        }
+        result = build_otif_trend_df(snaps, days_back=365)
+        assert len(result) == 1
+        assert result.iloc[0]["OTIF_pct"] == 85.0
+
+    def test_gesorteerd_op_datum_en_gefilterd_op_days_back(self):
+        vandaag = pd.Timestamp(date.today()).normalize()
+        oud = vandaag - pd.Timedelta(days=200)
+        recent = vandaag - pd.Timedelta(days=10)
+        snaps = {
+            oud.strftime("%Y-%m-%d"):    {"tonnage_plan_kg": 1, "otif_pct": 70, "otif_totaal": 10,
+                                            "otif_gereed": 7, "otif_niet_gereed": 3, "created_at": "x", "backfilled": False},
+            recent.strftime("%Y-%m-%d"): {"tonnage_plan_kg": 2, "otif_pct": 85, "otif_totaal": 20,
+                                            "otif_gereed": 17, "otif_niet_gereed": 3, "created_at": "x", "backfilled": True},
+        }
+        # 90 dagen: alleen recent
+        result = build_otif_trend_df(snaps, days_back=90)
+        assert len(result) == 1
+        assert result.iloc[0]["OTIF_pct"] == 85
+        assert bool(result.iloc[0]["Backfilled"]) is True
+        # 365 dagen: beide, oplopend gesorteerd
+        result_full = build_otif_trend_df(snaps, days_back=365)
+        assert len(result_full) == 2
+        assert list(result_full["OTIF_pct"]) == [70.0, 85.0]
+
+
+class TestBuildProductieDashboardWeekWithSnapshots:
+    """Controleer dat historische TONNAGE PLAN uit snapshots komt."""
+
+    def test_historisch_uit_snapshot(self):
+        # Kies een dag in het (recente) verleden
+        gisteren = pd.Timestamp(date.today()) - pd.Timedelta(days=1)
+        iso = gisteren.isocalendar()
+        snap_key = gisteren.strftime("%Y-%m-%d")
+        snapshots = {
+            snap_key: {"tonnage_plan_kg": 62000, "otif_pct": 88.0, "otif_totaal": 40,
+                       "otif_gereed": 35, "otif_niet_gereed": 5, "created_at": "x", "backfilled": False}
+        }
+        result = build_productie_dashboard_week(
+            mis_df=pd.DataFrame(columns=MIS_KOLOMMEN),
+            dag_df=pd.DataFrame(columns=["Verzinkdatum", "Gewicht_kg"]),
+            manual_dict={},
+            jaar=iso.year,
+            weeknr=iso.week,
+            feestdagen=frozenset(),
+            snapshots=snapshots,
+        )
+        # Zoek de rij voor gisteren
+        hit = result[pd.to_datetime(result["Datum"]) == gisteren.normalize()]
+        assert len(hit) == 1
+        assert hit.iloc[0]["TONNAGE PLAN"] == 62000.0
+
+    def test_historisch_zonder_snapshot_blijft_leeg(self):
+        gisteren = pd.Timestamp(date.today()) - pd.Timedelta(days=1)
+        iso = gisteren.isocalendar()
+        result = build_productie_dashboard_week(
+            mis_df=pd.DataFrame(columns=MIS_KOLOMMEN),
+            dag_df=pd.DataFrame(columns=["Verzinkdatum", "Gewicht_kg"]),
+            manual_dict={},
+            jaar=iso.year,
+            weeknr=iso.week,
+            feestdagen=frozenset(),
+            snapshots={},
+        )
+        hit = result[pd.to_datetime(result["Datum"]) == gisteren.normalize()]
+        assert pd.isna(hit.iloc[0]["TONNAGE PLAN"])
+
+    def test_toekomst_gebruikt_nog_altijd_dag_df(self):
+        morgen = pd.Timestamp(date.today()) + pd.Timedelta(days=1)
+        iso = morgen.isocalendar()
+        dag_df = pd.DataFrame([{"Verzinkdatum": morgen, "Gewicht_kg": 58000.0}])
+        result = build_productie_dashboard_week(
+            mis_df=pd.DataFrame(columns=MIS_KOLOMMEN),
+            dag_df=dag_df,
+            manual_dict={},
+            jaar=iso.year,
+            weeknr=iso.week,
+            feestdagen=frozenset(),
+            snapshots={},
+        )
+        hit = result[pd.to_datetime(result["Datum"]) == morgen.normalize()]
+        assert hit.iloc[0]["TONNAGE PLAN"] == 58000.0

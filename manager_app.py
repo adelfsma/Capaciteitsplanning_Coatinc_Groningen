@@ -24,6 +24,8 @@ from shared import (
     get_locatie_naam,
     get_locatie_logo,
     get_beheer_wachtwoord,
+    compute_otif_from_folder,
+    save_daily_snapshot,
 )
 from pathlib import Path
 import tempfile
@@ -184,6 +186,36 @@ if publish:
                 f"{len(newly_uploaded)} bestand(en) bijgewerkt: "
                 + ", ".join(newly_uploaded.keys())
             )
+
+            # ── OTIF-snapshot op moment van publicatie ─────────────────────
+            # De exports bevatten de orderstatus zoals die nu is — dit is het
+            # enige betrouwbare moment om de dagelijkse OTIF-waarde vast te
+            # leggen. De snapshot wordt slechts één keer per dag opgeslagen
+            # (overwrite=False); bij meerdere publicaties op dezelfde dag
+            # blijft de eerste (vroegste) snapshot leidend.
+            with st.spinner("OTIF-snapshot opslaan…"):
+                try:
+                    _otif_snap = compute_otif_from_folder(tmp_dir)
+                    _snap_saved = save_daily_snapshot(
+                        datum=datetime.now().date(),
+                        tonnage_plan_kg=None,  # plan-tonnage is niet beschikbaar in manager
+                        otif_result=_otif_snap,
+                        overwrite=False,
+                        backfilled=False,
+                    )
+                    if _snap_saved and _otif_snap and _otif_snap.get("otif_pct") is not None:
+                        st.info(
+                            f"📸 OTIF-snapshot opgeslagen: "
+                            f"{_otif_snap['otif_pct']:.1f}% "
+                            f"({_otif_snap.get('gereed', 0)}/{_otif_snap.get('totaal', 0)} orders op tijd)."
+                        )
+                    elif not _snap_saved:
+                        st.caption("ℹ️ Er bestaat al een OTIF-snapshot voor vandaag — niet overschreven.")
+                except Exception as _snap_err:
+                    st.warning(
+                        f"⚠️ Publicatie geslaagd, maar OTIF-snapshot kon niet worden opgeslagen: "
+                        f"{_snap_err}. De snapshot kan handmatig worden aangevuld via de viewer."
+                    )
     except Exception as e:
         st.error(f"Publicatie mislukt: {e}")
     finally:
