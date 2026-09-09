@@ -2074,7 +2074,17 @@ def compute_otif_from_folder(tmp_dir: Path) -> dict | None:
             p = tmp_dir / fname
             if p.exists():
                 try:
-                    frames.append(pd.read_excel(p))
+                    fdf = pd.read_excel(p)
+                    # Weekexports dragen hun leverdatum als 'Datum', niet als
+                    # 'Leverdatum'. Zelfde omzetting als load_published_data()
+                    # (regel ~1303), nu ook hier toegepast vóór de concat --
+                    # anders krijgen deze rijen na pd.concat een lege/NaT
+                    # 'Leverdatum' en worden ze nooit gematcht op peildatum.
+                    if "Datum" in fdf.columns:
+                        fdf["Leverdatum"] = pd.to_datetime(
+                            fdf["Datum"], dayfirst=True, errors="coerce"
+                        )
+                    frames.append(fdf)
                 except Exception:
                     pass
 
