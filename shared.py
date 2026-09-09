@@ -146,7 +146,7 @@ OTIF_STATUS_MAP = {
     "geblokkeerd":               "Nee",
     "opgehangen":                "Nee",
     "ub":                        "Nee",
-    "nabewerking nog uitvoeren": "Nee",
+    "nabewerking nog uitvoeren": "Ja",
     "meetrapport":               "Ja",
 }
 
@@ -2307,6 +2307,23 @@ def compute_otif(
         is_meetrapport = status_key == "meetrapport"
         subset.loc[is_poetsen & is_afgehaald,    "OTIF_status"] = "Nee"
         subset.loc[~is_poetsen & is_meetrapport, "OTIF_status"] = "Ja"
+
+    # Ontzinkt-uitzondering: voor orders met status 'Ontzinkt' zegt de
+    # normale mapping ('Onbekend') niets over te vroeg/te laat. Als de
+    # PrijsCategorie 'ontzinken' bevat, is dit het eindstation van de
+    # order (geen hernieuwd verzinken gepland) en telt 'Ontzinkt' als op
+    # tijd ('Ja'). Bevat de PrijsCategorie zowel 'ontzinken' als
+    # 'verzinken' (order wordt later opnieuw verzinkt), dan is het
+    # eigenlijke verzinkwerk nog niet gedaan en telt 'Ontzinkt' als niet
+    # op tijd ('Nee'). Overige gevallen (geen 'ontzinken' in de
+    # PrijsCategorie) volgen de normale mapping ('Onbekend').
+    if prijscategorie_column in subset.columns:
+        is_ontzinkt = subset["Status"].astype(str).str.strip().str.casefold() == "ontzinkt"
+        prijscat = subset[prijscategorie_column].astype(str).str.casefold()
+        bevat_ontzinken = prijscat.str.contains("ontzinken", na=False)
+        bevat_verzinken = prijscat.str.contains("verzinken", na=False)
+        subset.loc[is_ontzinkt & bevat_ontzinken & ~bevat_verzinken, "OTIF_status"] = "Ja"
+        subset.loc[is_ontzinkt & bevat_ontzinken &  bevat_verzinken, "OTIF_status"] = "Nee"
 
     # Sluit poeder-coat orders uit; deze horen niet in de OTIF van de
     # verzinkstraat. Filteren gebeurt NA de datum/depot-mask en NA de
