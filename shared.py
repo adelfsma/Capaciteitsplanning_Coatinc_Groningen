@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.19"
+APP_VERSION = "v2.5.20"
 
 
 def get_app_environment() -> str:
@@ -429,7 +429,7 @@ def get_advies_config() -> dict:
       advies_horizon_werkdagen     = 20  # zoekhorizon in productieve dagen
       advies_buffer_werkdagen      = 3   # aantal productieve dagen na D in de buffertoets
       balie_verversing_minuten     = 5   # automatische verversing Balie-scherm
-      balie_altijd_vol_werkdagen   = 2   # eerste N werkdagen in de balietabel altijd "Vol"
+      balie_altijd_vol_werkdagen   = 5   # leverdatums vóór vandaag + N werkdagen: "Niet beschikbaar"
     """
     mn = int(_get_locatie_number("advies_drempel_min", 80))
     mx = int(_get_locatie_number("advies_drempel_max", 100))
@@ -446,7 +446,7 @@ def get_advies_config() -> dict:
         "horizon_werkdagen": max(int(_get_locatie_number("advies_horizon_werkdagen", 20)), 1),
         "buffer_werkdagen": max(int(_get_locatie_number("advies_buffer_werkdagen", 3)), 1),
         "balie_verversing_minuten": max(int(_get_locatie_number("balie_verversing_minuten", 5)), 1),
-        "balie_altijd_vol_werkdagen": max(int(_get_locatie_number("balie_altijd_vol_werkdagen", 2)), 0),
+        "balie_altijd_vol_werkdagen": max(int(_get_locatie_number("balie_altijd_vol_werkdagen", 5)), 0),
     }
 
 
@@ -1958,15 +1958,16 @@ def bereken_balie_capaciteit(
     vandaag,
     tot_datum,
     vol_drempel_pct: float = 95.0,
-    altijd_vol_werkdagen: int = 2,
+    altijd_vol_werkdagen: int = 5,
     levering_na_verzinken: int = 2,
 ) -> pd.DataFrame:
     """Beschikbare capaciteit per LEVERDATUM (datum gereed), van vandaag t/m tot_datum.
 
     Elke regel is een leverdatum; de capaciteit is die van de bijbehorende
     verzinkdag (leverdatum − `levering_na_verzinken` werkdagen).
-    - De eerste `altijd_vol_werkdagen` werkdagen (vanaf vandaag, feestdagen
-      niet meegeteld) -> "Niet beschikbaar".
+    - Leverdatums vóór vandaag + `altijd_vol_werkdagen` werkdagen (standaard
+      levertijd, feestdagen overgeslagen) -> "Niet beschikbaar". Doordeweeks
+      zijn dat de eerste 5 werkdagen vanaf vandaag.
     - Benutting van de verzinkdag >= vol_drempel_pct, of < 1.000 kg vrij -> "Vol".
     - Anders: beschikbaar = 100% capaciteit − geplande belasting, in BALIE_KLASSEN.
     Weekenden worden overgeslagen; feestdagen/sluitingen -> "Gesloten".
@@ -1978,21 +1979,20 @@ def bereken_balie_capaciteit(
     start = pd.Timestamp(vandaag).normalize()
     eind = pd.Timestamp(tot_datum).normalize()
 
+    eerste_leverbaar = add_workdays(start, int(altijd_vol_werkdagen), holiday_dates)
+
     rows = []
-    n_werkdagen = 0
     d = start
     while d <= eind:
         if d.weekday() < 5:
             gesloten = d.date() in holiday_dates
-            if not gesloten:
-                n_werkdagen += 1
             verzinkdag = _werkdagen_terug(d, levering_na_verzinken, holiday_dates)
             gepland = float(belasting.get(verzinkdag, 0.0))
             beschikbaar = 0.0 if gesloten else max(float(capaciteit_kg) - gepland, 0.0)
             benutting = (gepland / float(capaciteit_kg) * 100.0) if capaciteit_kg > 0 else float("inf")
             if gesloten:
                 label, key, vol = "Gesloten", "gesloten", False
-            elif n_werkdagen <= int(altijd_vol_werkdagen):
+            elif d < eerste_leverbaar:
                 label, key, vol = "Niet beschikbaar", "vol", True
             elif benutting >= float(vol_drempel_pct):
                 label, key, vol = "Vol", "vol", True
