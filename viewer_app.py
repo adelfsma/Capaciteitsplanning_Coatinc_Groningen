@@ -642,6 +642,7 @@ _BALIE_CSS = """
 }
 .balie-hero-label { font-size: max(1.1rem, min(3vh, 1.9cqw)); color: #4b5563; font-weight: 600; }
 .balie-hero-datum { font-size: max(2.2rem, min(9.5vh, 5.2cqw)); font-weight: 800; color: #111827; line-height: 1.04; margin: 1vh 0; }
+.balie-hero-levertijd { font-size: 0.38em; font-weight: 600; color: #6b7280; white-space: nowrap; vertical-align: middle; }
 .balie-hero-sub { font-size: max(0.95rem, min(2.3vh, 1.5cqw)); color: #6b7280; margin-top: 0.2rem; }
 .balie-tabel-card { padding: 0 0 0.6vh 0; overflow: hidden; }
 .balie-tabel-titel { font-size: max(1.1rem, min(3vh, 1.8cqw)); font-weight: 700; color: #1f2328; padding: 1.2vh 2.2rem 1vh 2.2rem; }
@@ -668,8 +669,9 @@ table.balie-tabel td.balie-datum { width: 20%; }
 }
 .balie-k4 { background: #15803d; }
 .balie-k3 { background: #4d7c0f; }
-.balie-k2 { background: #c2410c; }
-.balie-k1 { background: #b91c1c; }
+.balie-k2 { background: #a16207; }
+.balie-k1 { background: #c2410c; }
+.balie-vol { background: #b91c1c; }
 .balie-gesloten { background: #6b7280; }
 .balie-voet { font-size: max(0.85rem, min(1.6vh, 1.1cqw)); color: #6b7280; margin-top: 1vh; text-align: center; }
 .balie-melding { padding: 2rem 2.2rem; font-size: max(1.2rem, min(3vh, 2.4cqw)); color: #4b5563; }
@@ -691,8 +693,11 @@ table.balie-tabel td.balie-datum { width: 20%; }
 # Alleen in balie-modus: zijbalk, kopbalk en marges van Streamlit verbergen.
 _BALIE_FULLSCREEN_CSS = """
 <style>
-[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"], [data-testid="collapsedControl"],
-header[data-testid="stHeader"], [data-testid="stToolbar"], footer { display: none !important; }
+/* Klantscherm: kopbalk-acties en footer verbergen; de zijbalk blijft inklapbaar
+   zodat de instellingen op het balie-scherm aan te passen zijn. */
+header[data-testid="stHeader"] { background: transparent !important; }
+[data-testid="stToolbarActions"], [data-testid="stMainMenu"], [data-testid="stAppDeployButton"],
+[data-testid="stDecoration"], footer { display: none !important; }
 [data-testid="stMainBlockContainer"], .block-container {
     padding-top: 1.2rem !important; padding-bottom: 1rem !important; max-width: 100% !important;
 }
@@ -707,16 +712,43 @@ def _balie_logo_b64(path: str) -> str:
         return base64.b64encode(f.read()).decode("ascii")
 
 
-def _balie_lange_datum(d, meerregelig: bool = False) -> str:
+def _zoek_logo(naam: str) -> str | None:
+    """Zoek een logobestand in de werkmap én in de map van de app zelf."""
+    if not naam:
+        return None
+    if os.path.isabs(naam):
+        return naam if os.path.exists(naam) else None
+    mappen = [os.getcwd()]
+    try:
+        mappen.append(os.path.dirname(os.path.abspath(__file__)))
+    except NameError:
+        pass
+    for m in mappen:
+        pad = os.path.join(m, naam)
+        if os.path.exists(pad):
+            return pad
+    return None
+
+
+def _balie_logo_pad() -> tuple[str | None, bool]:
+    """(pad, is_balie_logo). Valt terug op het gewone vestigingslogo."""
+    pad = _zoek_logo(get_advies_config()["balie_logo"])
+    if pad:
+        return pad, True
+    return _zoek_logo(get_locatie_logo()), False
+
+
+def _balie_lange_datum(d, meerregelig: bool = False, achter_jaar: str = "") -> str:
     d = pd.Timestamp(d)
     sep = "<br>" if meerregelig else " "
-    return f"{_NL_DAGNAMEN[d.weekday()]}{sep}{d.day} {_NL_MAANDEN[d.month - 1]}{sep}{d.year}"
+    return f"{_NL_DAGNAMEN[d.weekday()]}{sep}{d.day} {_NL_MAANDEN[d.month - 1]}{sep}{d.year}{achter_jaar}"
 
 
 def _balie_header_html(stand: str) -> str:
-    logo_path = get_advies_config()["balie_logo"]
-    if os.path.exists(logo_path):
-        logo_html = f'<img src="data:image/png;base64,{_balie_logo_b64(logo_path)}" alt="{get_locatie_naam()}">'
+    logo_path, _ = _balie_logo_pad()
+    if logo_path:
+        mime = "image/jpeg" if logo_path.lower().endswith((".jpg", ".jpeg")) else "image/png"
+        logo_html = f'<img src="data:{mime};base64,{_balie_logo_b64(logo_path)}" alt="{get_locatie_naam()}">'
     else:
         logo_html = f'<div class="balie-header-titel">{get_locatie_naam()}</div>'
     return (
@@ -726,13 +758,12 @@ def _balie_header_html(stand: str) -> str:
     )
 
 
-def _render_balie():
+def _render_balie(capaciteit_kg: float, drempel_pct: float, startdatum, kg_per_traverse: int):
     """Klantscherm: eerstvolgende leverdatum + beschikbare capaciteit in klassen.
 
-    Gebruikt altijd de standaardinstellingen van de vestiging (capaciteit,
-    adviesdrempel), zodat het scherm niet verandert als iemand in de viewer
-    aan de zijbalk schuift. Laadt zelf de data, zodat de automatische
-    verversing (st.fragment run_every) ook nieuwe publicaties oppikt.
+    Gebruikt de instellingen uit de zijbalk (capaciteit en adviesdrempel).
+    Laadt zelf de data, zodat de automatische verversing (st.fragment
+    run_every) ook nieuwe publicaties oppikt.
     """
     cfg = get_advies_config()
     vandaag = date.today()
@@ -742,15 +773,12 @@ def _render_balie():
 
     try:
         df_raw_b, _, _, holiday_b = load_published_data()
-        _, _, cap_default_ton, _ = get_max_capaciteit_config()
-        kg_constructie, _, _ = get_kg_traverse_defaults()
-        cap_kg_b = cap_default_ton * 1000
         df_b = build_dashboard_data(
-            df_raw_b, holiday_b, previous_workday(vandaag), cap_kg_b,
-            cfg["levering_na_verzinken"], kg_constructie,
+            df_raw_b, holiday_b, startdatum, capaciteit_kg,
+            cfg["levering_na_verzinken"], kg_per_traverse,
         )[0]
         adv = bereken_eerstvolgende_leverdatum(
-            df_b, holiday_b, cap_kg_b, cfg["drempel_default"], vandaag,
+            df_b, holiday_b, capaciteit_kg, drempel_pct, vandaag,
             verzink_werkdagen=cfg["verzink_werkdagen"],
             levering_na_verzinken=cfg["levering_na_verzinken"],
             horizon_werkdagen=cfg["horizon_werkdagen"],
@@ -761,7 +789,9 @@ def _render_balie():
             tot = add_workdays(adv["leverdatum"], 3, hol_set)
         else:
             tot = add_workdays(pd.Timestamp(vandaag), 10, hol_set)
-        tabel = bereken_balie_capaciteit(df_b, holiday_b, cap_kg_b, vandaag, tot)
+        tabel = bereken_balie_capaciteit(
+            df_b, holiday_b, capaciteit_kg, vandaag, tot, vol_drempel_pct=drempel_pct,
+        )
     except Exception:
         st.markdown(
             kop + '<div class="balie-card balie-melding">De actuele levertijd is op dit moment '
@@ -771,10 +801,15 @@ def _render_balie():
         return
 
     if adv["gevonden"]:
+        n_wd = adv.get("levertijd_werkdagen")
+        levertijd_html = (
+            f' <span class="balie-hero-levertijd">({n_wd} werkdag{"en" if n_wd != 1 else ""})</span>'
+            if n_wd else ""
+        )
         hero = (
             '<div class="balie-card balie-hero">'
             '<div class="balie-hero-label">Eerstvolgende leverdatum</div>'
-            f'<div class="balie-hero-datum">{_balie_lange_datum(adv["leverdatum"], meerregelig=True)}</div>'
+            f'<div class="balie-hero-datum">{_balie_lange_datum(adv["leverdatum"], meerregelig=True, achter_jaar=levertijd_html)}</div>'
             '<div class="balie-hero-sub">voor niet gereserveerde orders</div></div>'
         )
     else:
@@ -817,13 +852,6 @@ render_balie = st.fragment(
     run_every=timedelta(minutes=get_advies_config()["balie_verversing_minuten"])
 )(_render_balie)
 
-if BALIE_MODUS:
-    render_environment_banner("Balie")
-    st.markdown(_BALIE_FULLSCREEN_CSS, unsafe_allow_html=True)
-    render_balie()
-    st.stop()
-
-
 _logo = get_locatie_logo()
 if os.path.exists(_logo):
     st.sidebar.image(_logo, width=200)
@@ -835,7 +863,7 @@ if st.sidebar.button("🔄 Ververs data", help="Haal de nieuwste data uit de clo
     st.cache_data.clear()
     st.rerun()
 
-render_environment_banner("Viewer")
+render_environment_banner("Balie" if BALIE_MODUS else "Viewer")
 
 meta = load_metadata()
 if meta:
@@ -849,7 +877,9 @@ if meta:
     if notes:
         st.sidebar.write(f"Toelichting: {notes}")
 
-if is_test_environment():
+if BALIE_MODUS:
+    pass  # geen paginatitel op het klantscherm
+elif is_test_environment():
     st.markdown(
         f"<h1 style='margin-bottom:0'>Capaciteitsplanning {get_locatie_naam()}"
         f"&nbsp;<span style='"
@@ -980,6 +1010,13 @@ otif_result = compute_otif(
     uitsluiten_statussen=get_otif_uitsluiten_statussen(),
     uitsluiten_klanten=get_otif_uitsluiten_klanten(),
 )
+
+# Balie-modus (?view=balie): alleen het klantscherm, met de zijbalk-instellingen.
+_balie_args = (capaciteit_kg, advies_drempel_pct, startdatum, kg_per_traverse_constructie)
+if BALIE_MODUS:
+    st.markdown(_BALIE_FULLSCREEN_CSS, unsafe_allow_html=True)
+    render_balie(*_balie_args)
+    st.stop()
 
 tab1, tab_prod, tab2, tab3, tab4, tab_balie = st.tabs(
     ["Voorraad & OTIF", "Productie dashboard", "Gebruikte gegevens", "OTIF", "Debug", "Balie"]
@@ -1135,7 +1172,7 @@ with tab1:
         )
         st.markdown(
             f'''<div style="padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid #d0d7de; background-color: #f6f8fa; margin-bottom: 0.75rem;">
-                <div style="font-size: 2.2rem; font-weight: 700;">{_fmt_d(advies["leverdatum"])}</div>
+                <div style="font-size: 2.2rem; font-weight: 700;">{_fmt_d(advies["leverdatum"])} <span style="font-size: 1.1rem; font-weight: 500; color: #475569;">({advies["levertijd_werkdagen"]} werkdagen)</span></div>
                 <div style="font-size: 1rem; color: #475569; margin-top: 0.2rem;">Verzinkdatum: <strong>{_fmt_d(advies["verzinkdatum"])}</strong>{_opgeschoven}</div>
                 <div style="font-size: 0.82rem; color: #64748b; margin-top: 0.35rem;">
                     Benutting verzinkdag: {_pct(advies["benutting_d"])} · gemiddelde {_b1.strftime("%d-%m")} t/m {_b2.strftime("%d-%m")}: {_pct(advies["buffer_gemiddelde"])} · drempel {_pct(advies["drempel_pct"])}
@@ -1946,8 +1983,15 @@ with tab4:
 
 with tab_balie:
     st.caption(
-        "Klantscherm voor de balie. Gebruikt altijd de standaardinstellingen van de "
-        "vestiging (capaciteit en adviesdrempel), niet de zijbalk. Ververst automatisch. "
-        "Voor het scherm bij de balie: open de app met ?view=balie achter de URL."
+        "Klantscherm voor de balie. Gebruikt de instellingen uit de zijbalk (capaciteit en "
+        "adviesdrempel) en ververst automatisch. Voor het scherm bij de balie: open de app met "
+        "?view=balie achter de URL; de zijbalk is daar in te klappen."
     )
-    render_balie()
+    _logo_pad, _is_balie_logo = _balie_logo_pad()
+    if not _is_balie_logo:
+        st.warning(
+            f"Balie-logo '{get_advies_config()['balie_logo']}' niet gevonden in "
+            f"{os.getcwd()}. Zet het bestand in de root van de repo (naast viewer_app.py)."
+            + (" Nu wordt het gewone vestigingslogo getoond." if _logo_pad else "")
+        )
+    render_balie(*_balie_args)

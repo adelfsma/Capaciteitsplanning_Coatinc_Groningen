@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.16"
+APP_VERSION = "v2.5.17"
 
 
 def get_app_environment() -> str:
@@ -1890,6 +1890,7 @@ def bereken_eerstvolgende_leverdatum(
         "drempel_pct": drempel,
         "horizon_werkdagen": int(horizon_werkdagen),
         "buffer_werkdagen": n_buffer,
+        "levertijd_werkdagen": None,
     }
 
     for i in range(int(horizon_werkdagen)):
@@ -1906,13 +1907,23 @@ def bereken_eerstvolgende_leverdatum(
                 "aantal_opgeschoven": i,
             })
             break
+
+    # Levertijd in werkdagen: productieve dagen na vandaag t/m leverdatum.
+    if result["leverdatum"] is not None:
+        result["levertijd_werkdagen"] = sum(
+            1 for d in pd.date_range(vandaag_ts + timedelta(days=1), result["leverdatum"])
+            if d.weekday() < 5 and d.date() not in holiday_dates
+        )
+    else:
+        result["levertijd_werkdagen"] = None
     return result
 
 
 # ── Balie: beschikbare capaciteit in klassen ─────────────────────────────────
-# Klassen voor het klantscherm: (ondergrens incl., bovengrens excl., label, sleutel)
+# Klassen voor het klantscherm: (ondergrens incl., bovengrens excl., label, sleutel).
+# Dagen met een benutting op of boven de adviesdrempel krijgen apart "Vol".
 BALIE_KLASSEN = [
-    (0,      1_000,        "0 – 1.000 kg",      "k1"),
+    (0,      1_000,        "tot 1.000 kg",      "k1"),
     (1_000,  5_000,        "1.000 – 5.000 kg",  "k2"),
     (5_000,  10_000,       "5.000 – 10.000 kg", "k3"),
     (10_000, float("inf"), "meer dan 10.000 kg", "k4"),
@@ -1935,13 +1946,15 @@ def bereken_balie_capaciteit(
     capaciteit_kg: float,
     vandaag,
     tot_datum,
+    vol_drempel_pct: float = 95.0,
 ) -> pd.DataFrame:
     """Beschikbare verzinkcapaciteit per werkdag van vandaag t/m tot_datum.
 
-    Beschikbaar = 100% capaciteit − geplande belasting (open orders incl.
-    reserveringen), nooit negatief. Weekenden worden overgeslagen;
-    feestdagen/sluitingen krijgen Gesloten = True.
-    Kolommen: Datum, Gesloten, Gepland_kg, Beschikbaar_kg, Klasse, Klasse_key.
+    - Benutting >= vol_drempel_pct (de adviesdrempel)  -> "Vol".
+    - Anders: beschikbaar = 100% capaciteit − geplande belasting (open orders
+      incl. reserveringen), ingedeeld in BALIE_KLASSEN.
+    Weekenden worden overgeslagen; feestdagen/sluitingen -> "Gesloten".
+    Kolommen: Datum, Gesloten, Vol, Gepland_kg, Beschikbaar_kg, Klasse, Klasse_key.
     """
     holiday_dates = _holiday_set(holiday_df)
     belasting = _open_belasting_per_dag(df)
@@ -1955,10 +1968,18 @@ def bereken_balie_capaciteit(
             gesloten = d.date() in holiday_dates
             gepland = float(belasting.get(d, 0.0))
             beschikbaar = 0.0 if gesloten else max(float(capaciteit_kg) - gepland, 0.0)
-            label, key = ("Gesloten", "gesloten") if gesloten else capaciteit_klasse(beschikbaar)
+            benutting = (gepland / float(capaciteit_kg) * 100.0) if capaciteit_kg > 0 else float("inf")
+            vol = (not gesloten) and benutting >= float(vol_drempel_pct)
+            if gesloten:
+                label, key = "Gesloten", "gesloten"
+            elif vol:
+                label, key = "Vol", "vol"
+            else:
+                label, key = capaciteit_klasse(beschikbaar)
             rows.append({
                 "Datum": d,
                 "Gesloten": gesloten,
+                "Vol": vol,
                 "Gepland_kg": gepland,
                 "Beschikbaar_kg": beschikbaar,
                 "Klasse": label,
@@ -1966,7 +1987,7 @@ def bereken_balie_capaciteit(
             })
         d += timedelta(days=1)
     return pd.DataFrame(
-        rows, columns=["Datum", "Gesloten", "Gepland_kg", "Beschikbaar_kg", "Klasse", "Klasse_key"]
+        rows, columns=["Datum", "Gesloten", "Vol", "Gepland_kg", "Beschikbaar_kg", "Klasse", "Klasse_key"]
     )
 
 

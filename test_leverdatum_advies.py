@@ -1,4 +1,4 @@
-"""Tests voor eerstvolgende leverdatum en balie-capaciteit (v2.5.16)."""
+"""Tests voor eerstvolgende leverdatum en balie-capaciteit (v2.5.17)."""
 from datetime import date
 
 import pandas as pd
@@ -42,6 +42,7 @@ def test_leeg_standaard_levertijd():
     assert r["verzinkdatum"] == pd.Timestamp("2026-10-13")  # werkdag 3
     assert r["leverdatum"] == pd.Timestamp("2026-10-15")    # werkdag 5
     assert r["aantal_opgeschoven"] == 0
+    assert r["levertijd_werkdagen"] == 5
 
 
 def test_voorbeeld_buffer_3_dagen():
@@ -59,6 +60,7 @@ def test_voorbeeld_buffer_3_dagen():
         pd.Timestamp("2026-10-19"), pd.Timestamp("2026-10-20"), pd.Timestamp("2026-10-21"),
     )
     assert r["aantal_opgeschoven"] == 3
+    assert r["levertijd_werkdagen"] == 8
 
 
 def test_d_zelf_telt_niet_mee_in_gemiddelde():
@@ -87,6 +89,7 @@ def test_feestdag_overgeslagen():
     r = _run(_df({}), _hol("2026-10-13"))
     assert r["verzinkdatum"] == pd.Timestamp("2026-10-14")
     assert r["leverdatum"] == pd.Timestamp("2026-10-16")
+    assert r["levertijd_werkdagen"] == 5  # feestdag telt niet als werkdag
 
 
 def test_coat_en_verzinkt_tellen_niet_mee():
@@ -122,12 +125,26 @@ def test_capaciteit_klassen():
 
 
 def test_balie_tabel():
-    # di 13-10 feestdag; vr 09-10 overboekt (102%); ma 12-10 heeft 2.400 kg vrij
-    df = _df({"2026-10-09": 102, "2026-10-12": 96})
+    # di 13-10 feestdag; vr 09-10 overboekt (102%) -> Vol;
+    # ma 12-10 94% -> 3.600 kg vrij -> 1.000-5.000
+    df = _df({"2026-10-09": 102, "2026-10-12": 94})
     t = bereken_balie_capaciteit(df, _hol("2026-10-13"), CAP, VANDAAG, pd.Timestamp("2026-10-15"))
     assert list(t["Datum"].dt.strftime("%d-%m")) == ["08-10", "09-10", "12-10", "13-10", "14-10", "15-10"]
     rij = t.set_index(t["Datum"].dt.strftime("%d-%m"))
-    assert rij.loc["09-10", "Beschikbaar_kg"] == 0 and rij.loc["09-10", "Klasse_key"] == "k1"
+    assert rij.loc["09-10", "Klasse"] == "Vol" and bool(rij.loc["09-10", "Vol"])
     assert rij.loc["12-10", "Klasse_key"] == "k2"
     assert bool(rij.loc["13-10", "Gesloten"]) and rij.loc["13-10", "Klasse"] == "Gesloten"
+    assert not bool(rij.loc["13-10", "Vol"])
     assert rij.loc["14-10", "Klasse_key"] == "k4"
+
+
+def test_vol_volgt_drempel():
+    # Precies 95% is Vol (zelfde grens als het advies: alleen < 95% is beschikbaar)
+    df = _df({"2026-10-09": 95, "2026-10-12": 90})
+    t = bereken_balie_capaciteit(df, _hol(), CAP, VANDAAG, pd.Timestamp("2026-10-12"))
+    rij = t.set_index(t["Datum"].dt.strftime("%d-%m"))
+    assert rij.loc["09-10", "Klasse"] == "Vol"
+    assert rij.loc["12-10", "Klasse_key"] == "k3"  # 10% van 60 ton = 6.000 kg vrij
+    # Met drempel 90% wordt 12-10 ook Vol
+    t2 = bereken_balie_capaciteit(df, _hol(), CAP, VANDAAG, pd.Timestamp("2026-10-12"), vol_drempel_pct=90)
+    assert t2.set_index(t2["Datum"].dt.strftime("%d-%m")).loc["12-10", "Klasse"] == "Vol"
