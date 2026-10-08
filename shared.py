@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.15"
+APP_VERSION = "v2.5.16"
 
 
 def get_app_environment() -> str:
@@ -427,6 +427,9 @@ def get_advies_config() -> dict:
       advies_levering_na_verzinken = 2   # leverdatum = verzinkdatum + X werkdagen
       advies_drempel_min / _max / _default / _step  (slider, in %)
       advies_horizon_werkdagen     = 20  # zoekhorizon in productieve dagen
+      advies_buffer_werkdagen      = 3   # aantal productieve dagen na D in de buffertoets
+      balie_verversing_minuten     = 5   # automatische verversing Balie-scherm
+      balie_logo                   = "logo_balie_coatinc_groningen.png"
     """
     mn = int(_get_locatie_number("advies_drempel_min", 80))
     mx = int(_get_locatie_number("advies_drempel_max", 100))
@@ -441,6 +444,9 @@ def get_advies_config() -> dict:
         "drempel_default": min(max(default, mn), mx),
         "drempel_step": max(int(_get_locatie_number("advies_drempel_step", 1)), 1),
         "horizon_werkdagen": max(int(_get_locatie_number("advies_horizon_werkdagen", 20)), 1),
+        "buffer_werkdagen": max(int(_get_locatie_number("advies_buffer_werkdagen", 3)), 1),
+        "balie_verversing_minuten": max(int(_get_locatie_number("balie_verversing_minuten", 5)), 1),
+        "balie_logo": _get_locatie_setting("balie_logo", "logo_balie_coatinc_groningen.png"),
     }
 
 
@@ -1806,6 +1812,29 @@ def _volgende_productieve_dagen(start: pd.Timestamp, aantal: int, holiday_dates:
     return out
 
 
+def _open_belasting_per_dag(df: pd.DataFrame) -> pd.Series:
+    """Geplande belasting (kg) per verzinkdatum van alle open orders: niet
+    verzinkt, geen coat-order, inclusief reserveringen. Onafhankelijk van de
+    startdatum/horizon van het rapport."""
+    benodigd = {"Verzinkstatus", "Verzinkdatum", "Gewicht_effectief_kg"}
+    if df is None or df.empty or not benodigd.issubset(df.columns):
+        return pd.Series(dtype=float)
+    open_mask = df["Verzinkstatus"] == "Niet verzinkt"
+    if "Reden_uitsluiting" in df.columns:
+        open_mask &= df["Reden_uitsluiting"] != "Coat-order"
+    open_df = df.loc[open_mask & df["Verzinkdatum"].notna()]
+    return (
+        open_df.assign(_d=pd.to_datetime(open_df["Verzinkdatum"]).dt.normalize())
+        .groupby("_d")["Gewicht_effectief_kg"].sum()
+    )
+
+
+def _holiday_set(holiday_df: pd.DataFrame) -> set:
+    if holiday_df is None or holiday_df.empty:
+        return set()
+    return set(holiday_df["Datum"].tolist())
+
+
 @st.cache_data(show_spinner=False)
 def bereken_eerstvolgende_leverdatum(
     df: pd.DataFrame,
@@ -1816,6 +1845,7 @@ def bereken_eerstvolgende_leverdatum(
     verzink_werkdagen: int = 3,
     levering_na_verzinken: int = 2,
     horizon_werkdagen: int = 20,
+    buffer_werkdagen: int = 3,
 ) -> dict:
     """Bepaal de eerstvolgende verzink- en leverdatum voor een nieuwe
     (nog niet gereserveerde) order.
@@ -1823,37 +1853,23 @@ def bereken_eerstvolgende_leverdatum(
     Regels:
       1. Vroegste verzinkdatum = vandaag + `verzink_werkdagen` werkdagen.
       2. Kandidaat-dag D voldoet als benutting(D) < drempel én het gemiddelde
-         van de benutting op de 2 productieve dagen NA D < drempel.
+         van de benutting op de `buffer_werkdagen` productieve dagen NA D
+         < drempel. D zelf telt niet mee in dat gemiddelde.
       3. Zo niet: één productieve dag opschuiven en opnieuw toetsen.
       4. Leverdatum = verzinkdatum + `levering_na_verzinken` werkdagen.
-    Werkdagen = ma-vr zonder feestdagen/sluitingen. Belasting = alle open
-    (niet verzinkte, niet-coat) orders incl. reserveringen, per verzinkdatum,
-    onafhankelijk van de startdatum en horizon van het rapport.
+    Werkdagen = ma-vr zonder feestdagen/sluitingen.
 
-    `df` is de eerste return-waarde van build_dashboard_data (bevat
-    Verzinkdatum, Verzinkstatus, Reden_uitsluiting, Gewicht_effectief_kg).
+    `df` is de eerste return-waarde van build_dashboard_data.
     `vandaag` is een expliciete parameter zodat de cache per dag ververst.
     """
-    holiday_dates = set(holiday_df["Datum"].tolist()) if holiday_df is not None and not holiday_df.empty else set()
+    holiday_dates = _holiday_set(holiday_df)
     drempel = float(drempel_pct)
+    n_buffer = int(buffer_werkdagen)
     vandaag_ts = pd.Timestamp(vandaag).normalize()
-
-    # Open belasting per verzinkdatum, los van startdatum rapport.
-    benodigd = {"Verzinkstatus", "Verzinkdatum", "Gewicht_effectief_kg"}
-    if df is None or df.empty or not benodigd.issubset(df.columns):
-        belasting = pd.Series(dtype=float)
-    else:
-        open_mask = df["Verzinkstatus"] == "Niet verzinkt"
-        if "Reden_uitsluiting" in df.columns:
-            open_mask &= df["Reden_uitsluiting"] != "Coat-order"
-        open_df = df.loc[open_mask & df["Verzinkdatum"].notna()]
-        belasting = (
-            open_df.assign(_d=pd.to_datetime(open_df["Verzinkdatum"]).dt.normalize())
-            .groupby("_d")["Gewicht_effectief_kg"].sum()
-        )
+    belasting = _open_belasting_per_dag(df)
 
     vroegste = add_workdays(vandaag_ts, int(verzink_werkdagen), holiday_dates)
-    dagen = _volgende_productieve_dagen(vroegste, int(horizon_werkdagen) + 2, holiday_dates)
+    dagen = _volgende_productieve_dagen(vroegste, int(horizon_werkdagen) + n_buffer, holiday_dates)
 
     def _benut(d):
         if capaciteit_kg <= 0:
@@ -1873,22 +1889,85 @@ def bereken_eerstvolgende_leverdatum(
         "aantal_opgeschoven": 0,
         "drempel_pct": drempel,
         "horizon_werkdagen": int(horizon_werkdagen),
+        "buffer_werkdagen": n_buffer,
     }
 
     for i in range(int(horizon_werkdagen)):
-        gem_buffer = (benutting[i + 1] + benutting[i + 2]) / 2.0
+        buffer = benutting[i + 1 : i + 1 + n_buffer]
+        gem_buffer = sum(buffer) / len(buffer)
         if benutting[i] < drempel and gem_buffer < drempel:
             result.update({
                 "gevonden": True,
                 "verzinkdatum": dagen[i],
                 "leverdatum": add_workdays(dagen[i], int(levering_na_verzinken), holiday_dates),
                 "benutting_d": benutting[i],
-                "buffer_dagen": (dagen[i + 1], dagen[i + 2]),
+                "buffer_dagen": tuple(dagen[i + 1 : i + 1 + n_buffer]),
                 "buffer_gemiddelde": gem_buffer,
                 "aantal_opgeschoven": i,
             })
             break
     return result
+
+
+# ── Balie: beschikbare capaciteit in klassen ─────────────────────────────────
+# Klassen voor het klantscherm: (ondergrens incl., bovengrens excl., label, sleutel)
+BALIE_KLASSEN = [
+    (0,      1_000,        "0 – 1.000 kg",      "k1"),
+    (1_000,  5_000,        "1.000 – 5.000 kg",  "k2"),
+    (5_000,  10_000,       "5.000 – 10.000 kg", "k3"),
+    (10_000, float("inf"), "meer dan 10.000 kg", "k4"),
+]
+
+
+def capaciteit_klasse(beschikbaar_kg: float) -> tuple[str, str]:
+    """Vertaal beschikbare kg naar (label, sleutel) volgens BALIE_KLASSEN."""
+    kg = max(float(beschikbaar_kg or 0.0), 0.0)
+    for onder, boven, label, sleutel in BALIE_KLASSEN:
+        if onder <= kg < boven:
+            return label, sleutel
+    return BALIE_KLASSEN[-1][2], BALIE_KLASSEN[-1][3]
+
+
+@st.cache_data(show_spinner=False)
+def bereken_balie_capaciteit(
+    df: pd.DataFrame,
+    holiday_df: pd.DataFrame,
+    capaciteit_kg: float,
+    vandaag,
+    tot_datum,
+) -> pd.DataFrame:
+    """Beschikbare verzinkcapaciteit per werkdag van vandaag t/m tot_datum.
+
+    Beschikbaar = 100% capaciteit − geplande belasting (open orders incl.
+    reserveringen), nooit negatief. Weekenden worden overgeslagen;
+    feestdagen/sluitingen krijgen Gesloten = True.
+    Kolommen: Datum, Gesloten, Gepland_kg, Beschikbaar_kg, Klasse, Klasse_key.
+    """
+    holiday_dates = _holiday_set(holiday_df)
+    belasting = _open_belasting_per_dag(df)
+    start = pd.Timestamp(vandaag).normalize()
+    eind = pd.Timestamp(tot_datum).normalize()
+
+    rows = []
+    d = start
+    while d <= eind:
+        if d.weekday() < 5:
+            gesloten = d.date() in holiday_dates
+            gepland = float(belasting.get(d, 0.0))
+            beschikbaar = 0.0 if gesloten else max(float(capaciteit_kg) - gepland, 0.0)
+            label, key = ("Gesloten", "gesloten") if gesloten else capaciteit_klasse(beschikbaar)
+            rows.append({
+                "Datum": d,
+                "Gesloten": gesloten,
+                "Gepland_kg": gepland,
+                "Beschikbaar_kg": beschikbaar,
+                "Klasse": label,
+                "Klasse_key": key,
+            })
+        d += timedelta(days=1)
+    return pd.DataFrame(
+        rows, columns=["Datum", "Gesloten", "Gepland_kg", "Beschikbaar_kg", "Klasse", "Klasse_key"]
+    )
 
 
 # ── Productie-dashboard (KPI-tabel per week, gevoed door MIS + planning) ──────
