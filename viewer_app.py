@@ -1982,11 +1982,7 @@ with tab4:
     st.dataframe(debug_df, width="stretch", hide_index=True)
 
 with tab_balie:
-    st.caption(
-        "Klantscherm voor de balie. Gebruikt de instellingen uit de zijbalk (capaciteit en "
-        "adviesdrempel) en ververst automatisch. Voor het scherm bij de balie: open de app met "
-        "?view=balie achter de URL; de zijbalk is daar in te klappen."
-    )
+    
     _logo_pad, _is_balie_logo = _balie_logo_pad()
     if not _is_balie_logo:
         st.warning(
