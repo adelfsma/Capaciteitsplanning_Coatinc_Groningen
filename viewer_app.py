@@ -1,6 +1,8 @@
 
+import base64
 import os
-from datetime import date
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 import numpy as np
@@ -24,6 +26,10 @@ from shared import (
     save_daily_snapshot,
     build_otif_trend_df,
     build_dashboard_data,
+    bereken_eerstvolgende_leverdatum,
+    bereken_balie_capaciteit,
+    add_workdays,
+    get_advies_config,
     build_productie_dashboard_week,
     build_productie_dashboard_ytd,
     compute_otif,
@@ -47,7 +53,20 @@ from shared import (
     get_norm_gem_gewicht_per_traverse,
 )
 
-st.set_page_config(layout="wide", page_title=get_page_title(f"Capaciteitsplanning {get_locatie_naam()}"))
+# Balie-modus: ?view=balie toont alleen het klantscherm (zonder zijbalk en
+# andere tabbladen), bedoeld voor het scherm bij de balie.
+try:
+    BALIE_MODUS = str(st.query_params.get("view", "")).strip().lower() == "balie"
+except Exception:
+    BALIE_MODUS = False
+
+st.set_page_config(
+    layout="wide",
+    page_title=get_page_title(
+        f"Balie {get_locatie_naam()}" if BALIE_MODUS else f"Capaciteitsplanning {get_locatie_naam()}"
+    ),
+    initial_sidebar_state="collapsed" if BALIE_MODUS else "auto",
+)
 
 def bereken_aantal_balken(
     day_df: pd.DataFrame,
@@ -590,6 +609,244 @@ def make_otif_gauge_svg(
     return "".join(svg_parts)
 
 
+# ── Balie (klantscherm) ───────────────────────────────────────────────────────
+_NL_DAGNAMEN = ["maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag", "zondag"]
+_NL_MAANDEN = ["januari", "februari", "maart", "april", "mei", "juni", "juli",
+               "augustus", "september", "oktober", "november", "december"]
+
+_BALIE_CSS = """
+<style>
+/* Maten schalen mee met de schermhoogte (vh) én de breedte van dit blok (cqw),
+   zodat het werkt op een liggend tv-scherm, staand scherm en in het tabblad. */
+.balie-wrap {
+    font-family: "Source Sans Pro", "Segoe UI", Arial, sans-serif; color: #1f2328;
+    container-type: inline-size; container-name: balie;
+}
+.balie-header {
+    display: flex; align-items: center; justify-content: space-between; gap: 2rem;
+    background: #2f3237; border-radius: 18px; padding: 0.7rem 2.2rem;
+    border-bottom: 6px solid #f6be4f; margin-bottom: 2vh;
+}
+.balie-header img { height: max(56px, min(11vh, 8cqw)); width: auto; display: block; }
+.balie-header-tekst { text-align: right; }
+.balie-header-titel { color: #ffffff; font-size: max(1.4rem, min(4.6vh, 3.2cqw)); font-weight: 700; line-height: 1.1; }
+.balie-header-stand { color: #f6be4f; font-size: max(0.95rem, min(2.2vh, 1.6cqw)); margin-top: 0.3rem; }
+.balie-card {
+    background: #ffffff; border-radius: 18px; box-shadow: 0 2px 10px rgba(16, 24, 40, 0.08);
+    border: 1px solid #e5e7eb;
+}
+.balie-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 2vh 1.6rem; align-items: stretch; }
+.balie-hero {
+    padding: 2vh 2.2rem; border-left: 12px solid #f6be4f;
+    display: flex; flex-direction: column; justify-content: center;
+}
+.balie-hero-label { font-size: max(1.1rem, min(3vh, 1.9cqw)); color: #4b5563; font-weight: 600; }
+.balie-hero-datum { font-size: max(2.2rem, min(9.5vh, 5.2cqw)); font-weight: 800; color: #111827; line-height: 1.04; margin: 1vh 0; }
+.balie-hero-levertijd { font-size: 0.38em; font-weight: 600; color: #6b7280; white-space: nowrap; vertical-align: middle; }
+.balie-hero-sub { font-size: max(0.95rem, min(2.3vh, 1.5cqw)); color: #6b7280; margin-top: 0.2rem; }
+.balie-tabel-card { padding: 0 0 0.6vh 0; overflow: hidden; }
+.balie-tabel-titel { font-size: max(1.1rem, min(3vh, 1.8cqw)); font-weight: 700; color: #1f2328; padding: 1.2vh 2.2rem 1vh 2.2rem; }
+table.balie-tabel {
+    width: 100%; border-collapse: collapse; margin: 0;
+    font-size: max(1rem, min(var(--rij-vh, 3vh), 1.9cqw));
+}
+table.balie-tabel th, table.balie-tabel td { border-left: none !important; border-right: none !important; white-space: nowrap; }
+table.balie-tabel th {
+    background: #2f3237; color: #ffffff; text-align: left; font-weight: 600;
+    padding: 0.3em 1.2em; font-size: 0.72em; letter-spacing: 0.02em; border: none !important;
+}
+table.balie-tabel td { padding: 0.1em 1.2em; line-height: 1.3; border-top: 1px solid #eceef1 !important; border-bottom: none !important; color: #1f2328; }
+table.balie-tabel tr:nth-child(even) td { background: #f8f9fb; }
+table.balie-tabel td.balie-dag { font-weight: 700; text-transform: capitalize; width: 38%; }
+table.balie-tabel td.balie-datum { width: 20%; }
+.balie-vandaag {
+    display: inline-block; margin-left: 0.5em; font-size: 0.55em; font-weight: 700; vertical-align: middle;
+    background: #f6be4f; color: #2f3237; border-radius: 999px; padding: 0.15em 0.7em; text-transform: none;
+}
+.balie-badge {
+    display: inline-block; min-width: 9.5em; text-align: center; color: #ffffff; font-weight: 700;
+    border-radius: 999px; padding: 0.04em 0.8em; white-space: nowrap;
+}
+.balie-k4 { background: #15803d; }
+.balie-k3 { background: #a16207; }
+.balie-k2 { background: #c2410c; }
+.balie-vol { background: #b91c1c; }
+.balie-gesloten { background: #6b7280; }
+.balie-voet { font-size: max(0.85rem, min(1.6vh, 1.1cqw)); color: #6b7280; margin-top: 1vh; text-align: center; }
+.balie-melding { padding: 2rem 2.2rem; font-size: max(1.2rem, min(3vh, 2.4cqw)); color: #4b5563; }
+/* Smal blok (tabblad met zijbalk, staand scherm): blok en tabel onder elkaar. */
+@container balie (max-width: 1150px) {
+    .balie-grid { grid-template-columns: 1fr; }
+    .balie-header-titel { font-size: max(1.3rem, 5cqw); }
+    .balie-header-stand { font-size: max(0.9rem, 2.4cqw); }
+    .balie-header img { height: max(56px, 13cqw); }
+    .balie-hero-label { font-size: max(1.1rem, 3.4cqw); }
+    .balie-hero-datum { font-size: max(2rem, 8.5cqw); }
+    .balie-hero-sub { font-size: max(0.95rem, 2.6cqw); }
+    .balie-tabel-titel { font-size: max(1.1rem, 3.4cqw); }
+    table.balie-tabel { font-size: max(1rem, min(3.4cqw, 2.4rem)); }
+}
+</style>
+"""
+
+# Alleen in balie-modus: zijbalk, kopbalk en marges van Streamlit verbergen.
+_BALIE_FULLSCREEN_CSS = """
+<style>
+/* Klantscherm: kopbalk-acties en footer verbergen; de zijbalk blijft inklapbaar
+   zodat de instellingen op het balie-scherm aan te passen zijn. */
+header[data-testid="stHeader"] { background: transparent !important; }
+[data-testid="stToolbarActions"], [data-testid="stMainMenu"], [data-testid="stAppDeployButton"],
+[data-testid="stDecoration"], footer { display: none !important; }
+[data-testid="stMainBlockContainer"], .block-container {
+    padding-top: 1.2rem !important; padding-bottom: 1rem !important; max-width: 100% !important;
+}
+.stApp { background: #eef0f3; }
+</style>
+"""
+
+
+@st.cache_data(show_spinner=False)
+def _balie_logo_b64(path: str) -> str:
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("ascii")
+
+
+def _zoek_logo(naam: str) -> str | None:
+    """Zoek een logobestand in de werkmap én in de map van de app zelf."""
+    if not naam:
+        return None
+    if os.path.isabs(naam):
+        return naam if os.path.exists(naam) else None
+    mappen = [os.getcwd()]
+    try:
+        mappen.append(os.path.dirname(os.path.abspath(__file__)))
+    except NameError:
+        pass
+    for m in mappen:
+        pad = os.path.join(m, naam)
+        if os.path.exists(pad):
+            return pad
+    return None
+
+
+def _balie_lange_datum(d, meerregelig: bool = False, achter_jaar: str = "") -> str:
+    d = pd.Timestamp(d)
+    sep = "<br>" if meerregelig else " "
+    return f"{_NL_DAGNAMEN[d.weekday()]}{sep}{d.day} {_NL_MAANDEN[d.month - 1]}{sep}{d.year}{achter_jaar}"
+
+
+def _balie_header_html(stand: str) -> str:
+    logo_path = _zoek_logo(get_locatie_logo())  # altijd het gewone vestigingslogo
+    if logo_path:
+        mime = "image/jpeg" if logo_path.lower().endswith((".jpg", ".jpeg")) else "image/png"
+        logo_html = f'<img src="data:{mime};base64,{_balie_logo_b64(logo_path)}" alt="{get_locatie_naam()}">'
+    else:
+        logo_html = f'<div class="balie-header-titel">{get_locatie_naam()}</div>'
+    return (
+        f'<div class="balie-header">{logo_html}'
+        f'<div class="balie-header-tekst"><div class="balie-header-titel">Levertijd verzinken</div>'
+        f'<div class="balie-header-stand">{stand}</div></div></div>'
+    )
+
+
+def _render_balie(capaciteit_kg: float, drempel_pct: float, startdatum, kg_per_traverse: int):
+    """Klantscherm: eerstvolgende leverdatum + beschikbare capaciteit in klassen.
+
+    Gebruikt de instellingen uit de zijbalk (capaciteit en adviesdrempel).
+    Laadt zelf de data, zodat de automatische verversing (st.fragment
+    run_every) ook nieuwe publicaties oppikt.
+    """
+    cfg = get_advies_config()
+    vandaag = date.today()
+    nu = datetime.now(ZoneInfo("Europe/Amsterdam"))
+    stand = f"Stand van {nu.strftime('%d-%m-%Y %H:%M')}"
+    kop = _BALIE_CSS + '<div class="balie-wrap">' + _balie_header_html(stand)
+
+    try:
+        df_raw_b, _, _, holiday_b = load_published_data()
+        df_b = build_dashboard_data(
+            df_raw_b, holiday_b, startdatum, capaciteit_kg,
+            cfg["levering_na_verzinken"], kg_per_traverse,
+        )[0]
+        adv = bereken_eerstvolgende_leverdatum(
+            df_b, holiday_b, capaciteit_kg, drempel_pct, vandaag,
+            verzink_werkdagen=cfg["verzink_werkdagen"],
+            levering_na_verzinken=cfg["levering_na_verzinken"],
+            horizon_werkdagen=cfg["horizon_werkdagen"],
+            terugschuif_werkdagen=cfg["terugschuif_werkdagen"],
+        )
+        hol_set = set(holiday_b["Datum"].tolist()) if not holiday_b.empty else set()
+        # Tabel t/m vandaag + 15 werkdagen (instelbaar), maar altijd minstens
+        # t/m de eerstvolgende leverdatum.
+        tot = add_workdays(pd.Timestamp(vandaag), cfg["balie_werkdagen_vooruit"], hol_set)
+        if adv["gevonden"]:
+            tot = max(tot, pd.Timestamp(adv["leverdatum"]))
+        tabel = bereken_balie_capaciteit(
+            df_b, holiday_b, capaciteit_kg, vandaag, tot, vol_drempel_pct=drempel_pct,
+            altijd_vol_werkdagen=cfg["balie_altijd_vol_werkdagen"],
+            levering_na_verzinken=cfg["levering_na_verzinken"],
+            terugschuif_werkdagen=cfg["terugschuif_werkdagen"],
+        )
+    except Exception:
+        st.markdown(
+            kop + '<div class="balie-card balie-melding">De actuele levertijd is op dit moment '
+            'niet beschikbaar. Vraag gerust aan de balie.</div></div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    if adv["gevonden"]:
+        n_wd = adv.get("levertijd_werkdagen")
+        levertijd_html = (
+            f' <span class="balie-hero-levertijd">({n_wd} werkdag{"en" if n_wd != 1 else ""})</span>'
+            if n_wd else ""
+        )
+        hero = (
+            '<div class="balie-card balie-hero">'
+            '<div class="balie-hero-label">Eerstvolgende leverdatum</div>'
+            f'<div class="balie-hero-datum">{_balie_lange_datum(adv["leverdatum"], meerregelig=True, achter_jaar=levertijd_html)}</div>'
+            '<div class="balie-hero-sub">voor niet gereserveerde orders</div></div>'
+        )
+    else:
+        hero = (
+            '<div class="balie-card balie-hero">'
+            '<div class="balie-hero-label">Eerstvolgende leverdatum</div>'
+            '<div class="balie-hero-datum">In overleg</div>'
+            '<div class="balie-hero-sub">Vraag aan de balie naar de mogelijkheden</div></div>'
+        )
+
+    vandaag_ts = pd.Timestamp(vandaag).normalize()
+    rijen = []
+    for _, r in tabel.iterrows():
+        d = pd.Timestamp(r["Datum"])
+        tag = '<span class="balie-vandaag">vandaag</span>' if d == vandaag_ts else ""
+        rijen.append(
+            f'<tr><td class="balie-dag">{_NL_DAGNAMEN[d.weekday()]}{tag}</td>'
+            f'<td class="balie-datum">{d.strftime("%d-%m")}</td>'
+            f'<td><span class="balie-badge balie-{r["Klasse_key"]}">{r["Klasse"]}</span></td></tr>'
+        )
+    # Lettergrootte schaalt mee met het aantal regels, zodat de tabel op één
+    # scherm past (ca. 66% van de schermhoogte beschikbaar voor de regels).
+    tabel_vh = min(3.2, 66.0 / (max(len(rijen), 1) * 1.75))
+    tabel_html = (
+        '<div class="balie-card balie-tabel-card">'
+        '<div class="balie-tabel-titel">Beschikbare capaciteit per leverdatum</div>'
+        f'<table class="balie-tabel" style="--rij-vh: {tabel_vh:.2f}vh;"><thead><tr><th>Dag</th><th>Leverdatum</th><th>Beschikbaar</th></tr></thead>'
+        f'<tbody>{"".join(rijen)}</tbody></table></div>'
+    )
+    voet = '<div class="balie-voet">Indicatief overzicht, wordt automatisch bijgewerkt.</div>'
+    st.markdown(
+        kop + '<div class="balie-grid">' + hero + tabel_html + "</div>" + voet + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+# Automatische verversing: alleen dit blok wordt periodiek opnieuw uitgevoerd
+# (geen volledige herlaadbeurt van de pagina), zodat het gekozen tabblad blijft staan.
+render_balie = st.fragment(
+    run_every=timedelta(minutes=get_advies_config()["balie_verversing_minuten"])
+)(_render_balie)
+
 _logo = get_locatie_logo()
 if os.path.exists(_logo):
     st.sidebar.image(_logo, width=200)
@@ -601,7 +858,7 @@ if st.sidebar.button("🔄 Ververs data", help="Haal de nieuwste data uit de clo
     st.cache_data.clear()
     st.rerun()
 
-render_environment_banner("Viewer")
+render_environment_banner("Balie" if BALIE_MODUS else "Viewer")
 
 meta = load_metadata()
 if meta:
@@ -615,7 +872,9 @@ if meta:
     if notes:
         st.sidebar.write(f"Toelichting: {notes}")
 
-if is_test_environment():
+if BALIE_MODUS:
+    pass  # geen paginatitel op het klantscherm
+elif is_test_environment():
     st.markdown(
         f"<h1 style='margin-bottom:0'>Capaciteitsplanning {get_locatie_naam()}"
         f"&nbsp;<span style='"
@@ -630,11 +889,23 @@ st.sidebar.header("Instellingen")
 _cap_min, _cap_max, _cap_default, _cap_step = get_max_capaciteit_config()
 capaciteit_ton = st.sidebar.slider("Max capaciteit per dag (ton)", _cap_min, _cap_max, _cap_default, _cap_step)
 capaciteit_kg = capaciteit_ton * 1000
-offset = st.sidebar.selectbox("Verzinkdatum = leverdatum - X werkdagen", [1, 2, 3, 4], index=1)
+_advies_cfg = get_advies_config()
+# Vast: verzinkdatum = leverdatum - 2 werkdagen (leverdatum = verzinkdatum + 2).
+offset = _advies_cfg["levering_na_verzinken"]
 _kg_constr_def, _kg_maat_def, _kg_serie_def = get_kg_traverse_defaults()
 kg_per_traverse_constructie = st.sidebar.number_input("KG per traverse Constructie", min_value=100, max_value=10000, value=_kg_constr_def, step=50)
 kg_per_traverse_maatwerk = st.sidebar.number_input("KG per traverse Maatwerk", min_value=100, max_value=10000, value=_kg_maat_def, step=50)
 kg_per_traverse_seriewerk = st.sidebar.number_input("KG per traverse Seriewerk", min_value=100, max_value=10000, value=_kg_serie_def, step=50)
+advies_drempel_pct = st.sidebar.slider(
+    "Adviesdrempel eerstvolgende leverdatum (%)",
+    _advies_cfg["drempel_min"], _advies_cfg["drempel_max"],
+    _advies_cfg["drempel_default"], _advies_cfg["drempel_step"],
+    help=(
+        "Een verzinkdag is beschikbaar als de benutting op die dag, inclusief "
+        f"belasting na het terugschuiven van pieken (max. {_advies_cfg['terugschuif_werkdagen']} werkdagen) "
+        "onder deze drempel blijft."
+    ),
+)
 default_start = previous_workday(date.today())
 startdatum = st.sidebar.date_input("Startdatum rapport", value=default_start)
 toon_alle_regels = st.sidebar.checkbox("Toon alle regels in controletab", value=True)
@@ -652,6 +923,17 @@ df, df_plan, dag, week, advies_datum = build_dashboard_data(
     capaciteit_kg,
     offset,
     kg_per_traverse_constructie,
+)
+advies = bereken_eerstvolgende_leverdatum(
+    df,
+    holiday_df,
+    capaciteit_kg,
+    advies_drempel_pct,
+    date.today(),
+    verzink_werkdagen=_advies_cfg["verzink_werkdagen"],
+    levering_na_verzinken=_advies_cfg["levering_na_verzinken"],
+    horizon_werkdagen=_advies_cfg["horizon_werkdagen"],
+    terugschuif_werkdagen=_advies_cfg["terugschuif_werkdagen"],
 )
 dag = bereken_aantal_balken(
     dag,
@@ -725,8 +1007,15 @@ otif_result = compute_otif(
     uitsluiten_klanten=get_otif_uitsluiten_klanten(),
 )
 
-tab1, tab_prod, tab2, tab3, tab4 = st.tabs(
-    ["Voorraad & OTIF", "Productie dashboard", "Gebruikte gegevens", "OTIF", "Debug"]
+# Balie-modus (?view=balie): alleen het klantscherm, met de zijbalk-instellingen.
+_balie_args = (capaciteit_kg, advies_drempel_pct, startdatum, kg_per_traverse_constructie)
+if BALIE_MODUS:
+    st.markdown(_BALIE_FULLSCREEN_CSS, unsafe_allow_html=True)
+    render_balie(*_balie_args)
+    st.stop()
+
+tab1, tab_prod, tab2, tab3, tab4, tab_balie = st.tabs(
+    ["Voorraad & OTIF", "Productie dashboard", "Gebruikte gegevens", "OTIF", "Debug", "Balie"]
 )
 
 with tab1:
@@ -867,12 +1156,34 @@ with tab1:
             unsafe_allow_html=True,
         )
 
-    st.subheader("Eerstvolgende leverdatum")
-    st.markdown(f'<div style="padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid #d0d7de; background-color: #f6f8fa; margin-bottom: 0.75rem;"><div style="font-size: 2.2rem; font-weight: 700;">{advies_datum.strftime("%d-%m-%Y")}</div></div>', unsafe_allow_html=True)
+    st.subheader("Eerstvolgende leverdatum van niet gereserveerde orders")
+    if advies["gevonden"]:
+        _fmt_d = lambda d: f"{['ma','di','wo','do','vr','za','zo'][d.weekday()]} {d.strftime('%d-%m-%Y')}"
+        _pct = lambda v: f"{v:.1f}%".replace(".", ",")
+        _opgeschoven = (
+            f" · {advies['aantal_opgeschoven']} werkdag(en) opgeschoven t.o.v. de standaard "
+            f"verzinkdatum {_fmt_d(advies['vroegste_verzinkdatum'])}"
+            if advies["aantal_opgeschoven"] > 0 else " · standaard levertijd haalbaar"
+        )
+        st.markdown(
+            f'''<div style="padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid #d0d7de; background-color: #f6f8fa; margin-bottom: 0.75rem;">
+                <div style="font-size: 2.2rem; font-weight: 700;">{_fmt_d(advies["leverdatum"])} <span style="font-size: 1.1rem; font-weight: 500; color: #475569;">({advies["levertijd_werkdagen"]} werkdagen)</span></div>
+                <div style="font-size: 1rem; color: #475569; margin-top: 0.2rem;">Verzinkdatum: <strong>{_fmt_d(advies["verzinkdatum"])}</strong>{_opgeschoven}</div>
+                <div style="font-size: 0.82rem; color: #64748b; margin-top: 0.35rem;">
+                    Benutting verzinkdag na terugschuiven van pieken: {_pct(advies["benutting_d"])} (eigen orders: {_pct(advies["benutting_d_origineel"])}) · drempel {_pct(advies["drempel_pct"])}
+                </div>
+            </div>''',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.warning(
+            f"Geen verzinkdag gevonden binnen {advies['horizon_werkdagen']} werkdagen waarop de "
+            f"benutting (na terugschuiven van pieken) onder {advies['drempel_pct']:.0f}% blijft."
+        )
 
     st.subheader("Capaciteit versus dagbelasting op verzinkdatum")
     st.pyplot(make_professional_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
-    st.caption("De grafiek toont de geplande belasting per verzinkdatum, uitgesplitst naar bevestigde orders en reserveringen. De verzinkdatum is berekend als de leverdatum minus het ingestelde aantal werkdagen.")
+    st.caption("De grafiek toont de geplande belasting per verzinkdatum, uitgesplitst naar bevestigde orders en reserveringen. De verzinkdatum is berekend als de leverdatum minus 2 werkdagen.")
 
     st.subheader("Materiaaltype per verzinkdatum")
     st.pyplot(make_materiaaltype_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
@@ -1663,3 +1974,6 @@ with tab4:
     debug_df = pd.DataFrame(debug_rows)
     debug_df["Waarde"] = debug_df["Waarde"].astype(str)
     st.dataframe(debug_df, width="stretch", hide_index=True)
+
+with tab_balie:
+    render_balie(*_balie_args)
