@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.17"
+APP_VERSION = "v2.5.18"
 
 
 def get_app_environment() -> str:
@@ -429,7 +429,7 @@ def get_advies_config() -> dict:
       advies_horizon_werkdagen     = 20  # zoekhorizon in productieve dagen
       advies_buffer_werkdagen      = 3   # aantal productieve dagen na D in de buffertoets
       balie_verversing_minuten     = 5   # automatische verversing Balie-scherm
-      balie_logo                   = "logo_balie_coatinc_groningen.png"
+      balie_altijd_vol_werkdagen   = 2   # eerste N werkdagen in de balietabel altijd "Vol"
     """
     mn = int(_get_locatie_number("advies_drempel_min", 80))
     mx = int(_get_locatie_number("advies_drempel_max", 100))
@@ -446,7 +446,7 @@ def get_advies_config() -> dict:
         "horizon_werkdagen": max(int(_get_locatie_number("advies_horizon_werkdagen", 20)), 1),
         "buffer_werkdagen": max(int(_get_locatie_number("advies_buffer_werkdagen", 3)), 1),
         "balie_verversing_minuten": max(int(_get_locatie_number("balie_verversing_minuten", 5)), 1),
-        "balie_logo": _get_locatie_setting("balie_logo", "logo_balie_coatinc_groningen.png"),
+        "balie_altijd_vol_werkdagen": max(int(_get_locatie_number("balie_altijd_vol_werkdagen", 2)), 0),
     }
 
 
@@ -1921,9 +1921,9 @@ def bereken_eerstvolgende_leverdatum(
 
 # ── Balie: beschikbare capaciteit in klassen ─────────────────────────────────
 # Klassen voor het klantscherm: (ondergrens incl., bovengrens excl., label, sleutel).
-# Dagen met een benutting op of boven de adviesdrempel krijgen apart "Vol".
+# Dagen met een benutting op of boven de adviesdrempel, of met minder dan
+# 1.000 kg vrij, krijgen "Vol".
 BALIE_KLASSEN = [
-    (0,      1_000,        "tot 1.000 kg",      "k1"),
     (1_000,  5_000,        "1.000 – 5.000 kg",  "k2"),
     (5_000,  10_000,       "5.000 – 10.000 kg", "k3"),
     (10_000, float("inf"), "meer dan 10.000 kg", "k4"),
@@ -1931,12 +1931,12 @@ BALIE_KLASSEN = [
 
 
 def capaciteit_klasse(beschikbaar_kg: float) -> tuple[str, str]:
-    """Vertaal beschikbare kg naar (label, sleutel) volgens BALIE_KLASSEN."""
+    """Vertaal beschikbare kg naar (label, sleutel). Minder dan 1.000 kg = Vol."""
     kg = max(float(beschikbaar_kg or 0.0), 0.0)
     for onder, boven, label, sleutel in BALIE_KLASSEN:
         if onder <= kg < boven:
             return label, sleutel
-    return BALIE_KLASSEN[-1][2], BALIE_KLASSEN[-1][3]
+    return "Vol", "vol"
 
 
 @st.cache_data(show_spinner=False)
@@ -1947,12 +1947,15 @@ def bereken_balie_capaciteit(
     vandaag,
     tot_datum,
     vol_drempel_pct: float = 95.0,
+    altijd_vol_werkdagen: int = 2,
 ) -> pd.DataFrame:
     """Beschikbare verzinkcapaciteit per werkdag van vandaag t/m tot_datum.
 
     - Benutting >= vol_drempel_pct (de adviesdrempel)  -> "Vol".
     - Anders: beschikbaar = 100% capaciteit − geplande belasting (open orders
       incl. reserveringen), ingedeeld in BALIE_KLASSEN.
+    - De eerste `altijd_vol_werkdagen` werkdagen (vanaf vandaag, feestdagen
+      niet meegeteld) staan altijd op "Vol".
     Weekenden worden overgeslagen; feestdagen/sluitingen -> "Gesloten".
     Kolommen: Datum, Gesloten, Vol, Gepland_kg, Beschikbaar_kg, Klasse, Klasse_key.
     """
@@ -1962,20 +1965,27 @@ def bereken_balie_capaciteit(
     eind = pd.Timestamp(tot_datum).normalize()
 
     rows = []
+    n_werkdagen = 0
     d = start
     while d <= eind:
         if d.weekday() < 5:
             gesloten = d.date() in holiday_dates
+            if not gesloten:
+                n_werkdagen += 1
             gepland = float(belasting.get(d, 0.0))
             beschikbaar = 0.0 if gesloten else max(float(capaciteit_kg) - gepland, 0.0)
             benutting = (gepland / float(capaciteit_kg) * 100.0) if capaciteit_kg > 0 else float("inf")
-            vol = (not gesloten) and benutting >= float(vol_drempel_pct)
+            vol = (not gesloten) and (
+                n_werkdagen <= int(altijd_vol_werkdagen)
+                or benutting >= float(vol_drempel_pct)
+            )
             if gesloten:
                 label, key = "Gesloten", "gesloten"
             elif vol:
                 label, key = "Vol", "vol"
             else:
                 label, key = capaciteit_klasse(beschikbaar)
+                vol = key == "vol"
             rows.append({
                 "Datum": d,
                 "Gesloten": gesloten,

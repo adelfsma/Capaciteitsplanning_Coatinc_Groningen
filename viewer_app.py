@@ -668,9 +668,8 @@ table.balie-tabel td.balie-datum { width: 20%; }
     border-radius: 999px; padding: 0.06em 0.8em; white-space: nowrap;
 }
 .balie-k4 { background: #15803d; }
-.balie-k3 { background: #4d7c0f; }
-.balie-k2 { background: #a16207; }
-.balie-k1 { background: #c2410c; }
+.balie-k3 { background: #a16207; }
+.balie-k2 { background: #c2410c; }
 .balie-vol { background: #b91c1c; }
 .balie-gesloten { background: #6b7280; }
 .balie-voet { font-size: max(0.85rem, min(1.6vh, 1.1cqw)); color: #6b7280; margin-top: 1vh; text-align: center; }
@@ -730,14 +729,6 @@ def _zoek_logo(naam: str) -> str | None:
     return None
 
 
-def _balie_logo_pad() -> tuple[str | None, bool]:
-    """(pad, is_balie_logo). Valt terug op het gewone vestigingslogo."""
-    pad = _zoek_logo(get_advies_config()["balie_logo"])
-    if pad:
-        return pad, True
-    return _zoek_logo(get_locatie_logo()), False
-
-
 def _balie_lange_datum(d, meerregelig: bool = False, achter_jaar: str = "") -> str:
     d = pd.Timestamp(d)
     sep = "<br>" if meerregelig else " "
@@ -745,7 +736,7 @@ def _balie_lange_datum(d, meerregelig: bool = False, achter_jaar: str = "") -> s
 
 
 def _balie_header_html(stand: str) -> str:
-    logo_path, _ = _balie_logo_pad()
+    logo_path = _zoek_logo(get_locatie_logo())  # altijd het gewone vestigingslogo
     if logo_path:
         mime = "image/jpeg" if logo_path.lower().endswith((".jpg", ".jpeg")) else "image/png"
         logo_html = f'<img src="data:{mime};base64,{_balie_logo_b64(logo_path)}" alt="{get_locatie_naam()}">'
@@ -791,6 +782,7 @@ def _render_balie(capaciteit_kg: float, drempel_pct: float, startdatum, kg_per_t
             tot = add_workdays(pd.Timestamp(vandaag), 10, hol_set)
         tabel = bereken_balie_capaciteit(
             df_b, holiday_b, capaciteit_kg, vandaag, tot, vol_drempel_pct=drempel_pct,
+            altijd_vol_werkdagen=cfg["balie_altijd_vol_werkdagen"],
         )
     except Exception:
         st.markdown(
@@ -1982,12 +1974,4 @@ with tab4:
     st.dataframe(debug_df, width="stretch", hide_index=True)
 
 with tab_balie:
-    
-    _logo_pad, _is_balie_logo = _balie_logo_pad()
-    if not _is_balie_logo:
-        st.warning(
-            f"Balie-logo '{get_advies_config()['balie_logo']}' niet gevonden in "
-            f"{os.getcwd()}. Zet het bestand in de root van de repo (naast viewer_app.py)."
-            + (" Nu wordt het gewone vestigingslogo getoond." if _logo_pad else "")
-        )
     render_balie(*_balie_args)
