@@ -653,9 +653,9 @@ table.balie-tabel {
 table.balie-tabel th, table.balie-tabel td { border-left: none !important; border-right: none !important; white-space: nowrap; }
 table.balie-tabel th {
     background: #2f3237; color: #ffffff; text-align: left; font-weight: 600;
-    padding: 0.45em 1.2em; font-size: 0.72em; letter-spacing: 0.02em; border: none !important;
+    padding: 0.3em 1.2em; font-size: 0.72em; letter-spacing: 0.02em; border: none !important;
 }
-table.balie-tabel td { padding: 0.24em 1.2em; border-top: 1px solid #eceef1 !important; border-bottom: none !important; color: #1f2328; }
+table.balie-tabel td { padding: 0.1em 1.2em; line-height: 1.3; border-top: 1px solid #eceef1 !important; border-bottom: none !important; color: #1f2328; }
 table.balie-tabel tr:nth-child(even) td { background: #f8f9fb; }
 table.balie-tabel td.balie-dag { font-weight: 700; text-transform: capitalize; width: 38%; }
 table.balie-tabel td.balie-datum { width: 20%; }
@@ -665,7 +665,7 @@ table.balie-tabel td.balie-datum { width: 20%; }
 }
 .balie-badge {
     display: inline-block; min-width: 9.5em; text-align: center; color: #ffffff; font-weight: 700;
-    border-radius: 999px; padding: 0.06em 0.8em; white-space: nowrap;
+    border-radius: 999px; padding: 0.04em 0.8em; white-space: nowrap;
 }
 .balie-k4 { background: #15803d; }
 .balie-k3 { background: #a16207; }
@@ -776,14 +776,16 @@ def _render_balie(capaciteit_kg: float, drempel_pct: float, startdatum, kg_per_t
             buffer_werkdagen=cfg["buffer_werkdagen"],
         )
         hol_set = set(holiday_b["Datum"].tolist()) if not holiday_b.empty else set()
+        # Tabel t/m vandaag + 15 werkdagen (instelbaar), maar altijd minstens
+        # t/m de eerstvolgende leverdatum.
+        tot = add_workdays(pd.Timestamp(vandaag), cfg["balie_werkdagen_vooruit"], hol_set)
         if adv["gevonden"]:
-            tot = add_workdays(adv["leverdatum"], 3, hol_set)
-        else:
-            tot = add_workdays(pd.Timestamp(vandaag), 10, hol_set)
+            tot = max(tot, pd.Timestamp(adv["leverdatum"]))
         tabel = bereken_balie_capaciteit(
             df_b, holiday_b, capaciteit_kg, vandaag, tot, vol_drempel_pct=drempel_pct,
             altijd_vol_werkdagen=cfg["balie_altijd_vol_werkdagen"],
             levering_na_verzinken=cfg["levering_na_verzinken"],
+            buffer_werkdagen=cfg["buffer_werkdagen"],
         )
     except Exception:
         st.markdown(
@@ -824,8 +826,8 @@ def _render_balie(capaciteit_kg: float, drempel_pct: float, startdatum, kg_per_t
             f'<td><span class="balie-badge balie-{r["Klasse_key"]}">{r["Klasse"]}</span></td></tr>'
         )
     # Lettergrootte schaalt mee met het aantal regels, zodat de tabel op één
-    # scherm past (ca. 64% van de schermhoogte beschikbaar voor de regels).
-    tabel_vh = min(3.2, 64.0 / (max(len(rijen), 1) * 2.45))
+    # scherm past (ca. 66% van de schermhoogte beschikbaar voor de regels).
+    tabel_vh = min(3.2, 66.0 / (max(len(rijen), 1) * 1.75))
     tabel_html = (
         '<div class="balie-card balie-tabel-card">'
         '<div class="balie-tabel-titel">Beschikbare capaciteit per leverdatum</div>'

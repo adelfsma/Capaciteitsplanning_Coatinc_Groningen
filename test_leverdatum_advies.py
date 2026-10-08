@@ -1,4 +1,4 @@
-"""Tests voor eerstvolgende leverdatum en balie-capaciteit (v2.5.20)."""
+"""Tests voor eerstvolgende leverdatum en balie-capaciteit (v2.5.21)."""
 from datetime import date
 
 import pandas as pd
@@ -187,3 +187,25 @@ def test_vol_volgt_drempel():
     assert rij.loc["16-10", "Klasse_key"] == "k3"  # 10% van 60 ton = 6.000 kg vrij
     rij90 = _tabel(df, _hol(), "2026-10-16", vol_drempel_pct=90)
     assert rij90.loc["16-10", "Klasse"] == "Vol"
+
+
+def test_piek_na_verzinkdag_maakt_vol_en_tabel_sluit_aan_op_advies():
+    # Situatie uit de export van 08-10 (benutting t.o.v. capaciteit):
+    # piek op ma 19-10 (165%) maakt verzinkdag vr 16-10 (84%) ook vol,
+    # want gemiddelde 19/20/21-10 = 118%. Zelfde regel als het advies.
+    benut = {
+        "2026-10-12": 94.4, "2026-10-13": 97.3, "2026-10-14": 83.2, "2026-10-15": 99.2,
+        "2026-10-16": 84.2, "2026-10-19": 164.6, "2026-10-20": 84.0, "2026-10-21": 105.6,
+        "2026-10-22": 61.4, "2026-10-23": 85.6, "2026-10-26": 91.2, "2026-10-27": 75.0,
+        "2026-10-28": 75.6,
+    }
+    df = _df(benut)
+    rij = _tabel(df, _hol(), "2026-10-27")
+    assert rij.loc["16-10", "Klasse"] == "Vol"   # verzinkdag 14-10: gem. 15/16/19 = 116%
+    assert rij.loc["20-10", "Klasse"] == "Vol"   # verzinkdag 16-10: gem. 19/20/21 = 118%
+    assert rij.loc["22-10", "Klasse_key"] == "k3"  # verzinkdag 20-10: 84%, gem. 84%
+    adv = _run(df)
+    assert adv["leverdatum"] == pd.Timestamp("2026-10-22")
+    # Eerste beschikbare regel in de tabel = eerstvolgende leverdatum
+    beschikbaar = rij[~rij["Vol"] & ~rij["Gesloten"]]
+    assert beschikbaar.index[0] == "22-10"

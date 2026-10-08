@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.20"
+APP_VERSION = "v2.5.21"
 
 
 def get_app_environment() -> str:
@@ -430,6 +430,7 @@ def get_advies_config() -> dict:
       advies_buffer_werkdagen      = 3   # aantal productieve dagen na D in de buffertoets
       balie_verversing_minuten     = 5   # automatische verversing Balie-scherm
       balie_altijd_vol_werkdagen   = 5   # leverdatums vóór vandaag + N werkdagen: "Niet beschikbaar"
+      balie_werkdagen_vooruit      = 15  # balietabel loopt t/m vandaag + N werkdagen
     """
     mn = int(_get_locatie_number("advies_drempel_min", 80))
     mx = int(_get_locatie_number("advies_drempel_max", 100))
@@ -447,6 +448,7 @@ def get_advies_config() -> dict:
         "buffer_werkdagen": max(int(_get_locatie_number("advies_buffer_werkdagen", 3)), 1),
         "balie_verversing_minuten": max(int(_get_locatie_number("balie_verversing_minuten", 5)), 1),
         "balie_altijd_vol_werkdagen": max(int(_get_locatie_number("balie_altijd_vol_werkdagen", 5)), 0),
+        "balie_werkdagen_vooruit": max(int(_get_locatie_number("balie_werkdagen_vooruit", 15)), 1),
     }
 
 
@@ -1960,6 +1962,7 @@ def bereken_balie_capaciteit(
     vol_drempel_pct: float = 95.0,
     altijd_vol_werkdagen: int = 5,
     levering_na_verzinken: int = 2,
+    buffer_werkdagen: int = 3,
 ) -> pd.DataFrame:
     """Beschikbare capaciteit per LEVERDATUM (datum gereed), van vandaag t/m tot_datum.
 
@@ -1968,7 +1971,11 @@ def bereken_balie_capaciteit(
     - Leverdatums vóór vandaag + `altijd_vol_werkdagen` werkdagen (standaard
       levertijd, feestdagen overgeslagen) -> "Niet beschikbaar". Doordeweeks
       zijn dat de eerste 5 werkdagen vanaf vandaag.
-    - Benutting van de verzinkdag >= vol_drempel_pct, of < 1.000 kg vrij -> "Vol".
+    - "Vol" volgens dezelfde regel als bereken_eerstvolgende_leverdatum: de
+      verzinkdag D is alleen beschikbaar als benutting(D) < vol_drempel_pct én
+      het gemiddelde van de `buffer_werkdagen` productieve dagen na D ook
+      < vol_drempel_pct. Een piek op D+1..D+3 maakt D dus ook vol.
+      Ook < 1.000 kg vrij op D zelf -> "Vol".
     - Anders: beschikbaar = 100% capaciteit − geplande belasting, in BALIE_KLASSEN.
     Weekenden worden overgeslagen; feestdagen/sluitingen -> "Gesloten".
     Kolommen: Datum (= leverdatum), Verzinkdatum, Gesloten, Vol, Gepland_kg,
@@ -1981,6 +1988,11 @@ def bereken_balie_capaciteit(
 
     eerste_leverbaar = add_workdays(start, int(altijd_vol_werkdagen), holiday_dates)
 
+    def _benut(dag) -> float:
+        if capaciteit_kg <= 0:
+            return float("inf")
+        return float(belasting.get(dag, 0.0)) / float(capaciteit_kg) * 100.0
+
     rows = []
     d = start
     while d <= eind:
@@ -1989,12 +2001,16 @@ def bereken_balie_capaciteit(
             verzinkdag = _werkdagen_terug(d, levering_na_verzinken, holiday_dates)
             gepland = float(belasting.get(verzinkdag, 0.0))
             beschikbaar = 0.0 if gesloten else max(float(capaciteit_kg) - gepland, 0.0)
-            benutting = (gepland / float(capaciteit_kg) * 100.0) if capaciteit_kg > 0 else float("inf")
+            benutting = _benut(verzinkdag)
+            buffer = _volgende_productieve_dagen(
+                verzinkdag + timedelta(days=1), int(buffer_werkdagen), holiday_dates
+            ) if int(buffer_werkdagen) > 0 else []
+            buffer_gem = (sum(_benut(b) for b in buffer) / len(buffer)) if buffer else 0.0
             if gesloten:
                 label, key, vol = "Gesloten", "gesloten", False
             elif d < eerste_leverbaar:
                 label, key, vol = "Niet beschikbaar", "vol", True
-            elif benutting >= float(vol_drempel_pct):
+            elif benutting >= float(vol_drempel_pct) or buffer_gem >= float(vol_drempel_pct):
                 label, key, vol = "Vol", "vol", True
             else:
                 label, key = capaciteit_klasse(beschikbaar)
