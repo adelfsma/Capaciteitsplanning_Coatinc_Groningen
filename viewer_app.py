@@ -783,6 +783,7 @@ def _render_balie(capaciteit_kg: float, drempel_pct: float, startdatum, kg_per_t
         tabel = bereken_balie_capaciteit(
             df_b, holiday_b, capaciteit_kg, vandaag, tot, vol_drempel_pct=drempel_pct,
             altijd_vol_werkdagen=cfg["balie_altijd_vol_werkdagen"],
+            levering_na_verzinken=cfg["levering_na_verzinken"],
         )
     except Exception:
         st.markdown(
@@ -827,8 +828,8 @@ def _render_balie(capaciteit_kg: float, drempel_pct: float, startdatum, kg_per_t
     tabel_vh = min(3.2, 64.0 / (max(len(rijen), 1) * 2.45))
     tabel_html = (
         '<div class="balie-card balie-tabel-card">'
-        '<div class="balie-tabel-titel">Beschikbare verzinkcapaciteit per dag</div>'
-        f'<table class="balie-tabel" style="--rij-vh: {tabel_vh:.2f}vh;"><thead><tr><th>Dag</th><th>Datum</th><th>Beschikbaar</th></tr></thead>'
+        '<div class="balie-tabel-titel">Beschikbare capaciteit per leverdatum</div>'
+        f'<table class="balie-tabel" style="--rij-vh: {tabel_vh:.2f}vh;"><thead><tr><th>Dag</th><th>Leverdatum</th><th>Beschikbaar</th></tr></thead>'
         f'<tbody>{"".join(rijen)}</tbody></table></div>'
     )
     voet = '<div class="balie-voet">Indicatief overzicht, wordt automatisch bijgewerkt.</div>'

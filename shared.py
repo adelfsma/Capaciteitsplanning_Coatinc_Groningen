@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.18"
+APP_VERSION = "v2.5.19"
 
 
 def get_app_environment() -> str:
@@ -1939,6 +1939,17 @@ def capaciteit_klasse(beschikbaar_kg: float) -> tuple[str, str]:
     return "Vol", "vol"
 
 
+def _werkdagen_terug(d: pd.Timestamp, n: int, holiday_dates: set) -> pd.Timestamp:
+    """Ga n werkdagen terug vanaf d (weekenden en feestdagen overgeslagen)."""
+    out = pd.Timestamp(d).normalize()
+    resterend = int(n)
+    while resterend > 0:
+        out -= timedelta(days=1)
+        if out.weekday() < 5 and out.date() not in holiday_dates:
+            resterend -= 1
+    return out
+
+
 @st.cache_data(show_spinner=False)
 def bereken_balie_capaciteit(
     df: pd.DataFrame,
@@ -1948,16 +1959,19 @@ def bereken_balie_capaciteit(
     tot_datum,
     vol_drempel_pct: float = 95.0,
     altijd_vol_werkdagen: int = 2,
+    levering_na_verzinken: int = 2,
 ) -> pd.DataFrame:
-    """Beschikbare verzinkcapaciteit per werkdag van vandaag t/m tot_datum.
+    """Beschikbare capaciteit per LEVERDATUM (datum gereed), van vandaag t/m tot_datum.
 
-    - Benutting >= vol_drempel_pct (de adviesdrempel)  -> "Vol".
-    - Anders: beschikbaar = 100% capaciteit − geplande belasting (open orders
-      incl. reserveringen), ingedeeld in BALIE_KLASSEN.
+    Elke regel is een leverdatum; de capaciteit is die van de bijbehorende
+    verzinkdag (leverdatum − `levering_na_verzinken` werkdagen).
     - De eerste `altijd_vol_werkdagen` werkdagen (vanaf vandaag, feestdagen
-      niet meegeteld) staan altijd op "Vol".
+      niet meegeteld) -> "Niet beschikbaar".
+    - Benutting van de verzinkdag >= vol_drempel_pct, of < 1.000 kg vrij -> "Vol".
+    - Anders: beschikbaar = 100% capaciteit − geplande belasting, in BALIE_KLASSEN.
     Weekenden worden overgeslagen; feestdagen/sluitingen -> "Gesloten".
-    Kolommen: Datum, Gesloten, Vol, Gepland_kg, Beschikbaar_kg, Klasse, Klasse_key.
+    Kolommen: Datum (= leverdatum), Verzinkdatum, Gesloten, Vol, Gepland_kg,
+    Beschikbaar_kg, Klasse, Klasse_key.
     """
     holiday_dates = _holiday_set(holiday_df)
     belasting = _open_belasting_per_dag(df)
@@ -1972,24 +1986,22 @@ def bereken_balie_capaciteit(
             gesloten = d.date() in holiday_dates
             if not gesloten:
                 n_werkdagen += 1
-            gepland = float(belasting.get(d, 0.0))
+            verzinkdag = _werkdagen_terug(d, levering_na_verzinken, holiday_dates)
+            gepland = float(belasting.get(verzinkdag, 0.0))
             beschikbaar = 0.0 if gesloten else max(float(capaciteit_kg) - gepland, 0.0)
             benutting = (gepland / float(capaciteit_kg) * 100.0) if capaciteit_kg > 0 else float("inf")
-            vol = (not gesloten) and (
-                n_werkdagen <= int(altijd_vol_werkdagen)
-                or benutting >= float(vol_drempel_pct)
-            )
             if gesloten:
-                label, key = "Gesloten", "gesloten"
+                label, key, vol = "Gesloten", "gesloten", False
             elif n_werkdagen <= int(altijd_vol_werkdagen):
-                label, key = "Niet beschikbaar", "vol"
-            elif vol:
-                label, key = "Vol", "vol"
+                label, key, vol = "Niet beschikbaar", "vol", True
+            elif benutting >= float(vol_drempel_pct):
+                label, key, vol = "Vol", "vol", True
             else:
                 label, key = capaciteit_klasse(beschikbaar)
                 vol = key == "vol"
             rows.append({
                 "Datum": d,
+                "Verzinkdatum": verzinkdag,
                 "Gesloten": gesloten,
                 "Vol": vol,
                 "Gepland_kg": gepland,
@@ -1999,7 +2011,9 @@ def bereken_balie_capaciteit(
             })
         d += timedelta(days=1)
     return pd.DataFrame(
-        rows, columns=["Datum", "Gesloten", "Vol", "Gepland_kg", "Beschikbaar_kg", "Klasse", "Klasse_key"]
+        rows,
+        columns=["Datum", "Verzinkdatum", "Gesloten", "Vol", "Gepland_kg",
+                 "Beschikbaar_kg", "Klasse", "Klasse_key"],
     )
 
 

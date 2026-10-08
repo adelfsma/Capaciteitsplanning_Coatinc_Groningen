@@ -1,4 +1,4 @@
-"""Tests voor eerstvolgende leverdatum en balie-capaciteit (v2.5.18)."""
+"""Tests voor eerstvolgende leverdatum en balie-capaciteit (v2.5.19)."""
 from datetime import date
 
 import pandas as pd
@@ -129,42 +129,49 @@ def _tabel(df, hol, tot, **kw):
     return t.set_index(t["Datum"].dt.strftime("%d-%m"))
 
 
-def test_eerste_twee_werkdagen_altijd_vol():
-    # Lege planning: do 08-10 en vr 09-10 toch Vol, ma 12-10 vrij
+# De balietabel staat per LEVERDATUM; capaciteit = die van de verzinkdag
+# (leverdatum − 2 werkdagen). _df() zet belasting op de verzinkdag.
+
+def test_eerste_twee_werkdagen_niet_beschikbaar():
+    # Lege planning: leverdatum do 08-10 en vr 09-10 'Niet beschikbaar'
     rij = _tabel(_df({}), _hol(), "2026-10-13")
-    assert rij.loc["08-10", "Klasse"] == "Vol"
-    assert rij.loc["09-10", "Klasse"] == "Vol"
+    assert rij.loc["08-10", "Klasse"] == "Niet beschikbaar"
+    assert rij.loc["09-10", "Klasse"] == "Niet beschikbaar"
     assert rij.loc["12-10", "Klasse_key"] == "k4"
+    assert rij.loc["12-10", "Verzinkdatum"] == pd.Timestamp("2026-10-08")
     # Instelbaar: 0 = uit
     rij0 = _tabel(_df({}), _hol(), "2026-10-13", altijd_vol_werkdagen=0)
     assert rij0.loc["08-10", "Klasse_key"] == "k4"
 
 
-def test_feestdag_telt_niet_mee_bij_altijd_vol():
+def test_feestdag_telt_niet_mee_bij_niet_beschikbaar():
     # vr 09-10 feestdag -> do 08-10 en ma 12-10 zijn de twee eerste werkdagen
     rij = _tabel(_df({}), _hol("2026-10-09"), "2026-10-14")
     assert rij.loc["09-10", "Klasse"] == "Gesloten"
-    assert rij.loc["12-10", "Klasse"] == "Vol"
+    assert rij.loc["12-10", "Klasse"] == "Niet beschikbaar"
     assert rij.loc["13-10", "Klasse_key"] == "k4"
+    # leverdatum di 13-10 -> verzinkdag 2 werkdagen terug, feestdag overgeslagen: do 08-10
+    assert rij.loc["13-10", "Verzinkdatum"] == pd.Timestamp("2026-10-08")
 
 
-def test_balie_tabel():
-    # di 13-10 feestdag; wo 14-10 overboekt (102%) -> Vol;
-    # do 15-10 94% -> 3.600 kg vrij -> 1.000-5.000; vr 16-10 leeg -> >10.000
+def test_balie_tabel_per_leverdatum():
+    # verzinkdag wo 14-10 overboekt (102%) -> leverdatum vr 16-10 Vol
+    # verzinkdag do 15-10 94% (3.600 kg vrij) -> leverdatum ma 19-10 1.000-5.000
     df = _df({"2026-10-14": 102, "2026-10-15": 94})
-    rij = _tabel(df, _hol("2026-10-13"), "2026-10-16")
-    assert list(rij.index) == ["08-10", "09-10", "12-10", "13-10", "14-10", "15-10", "16-10"]
+    rij = _tabel(df, _hol("2026-10-13"), "2026-10-20")
+    assert list(rij.index) == ["08-10", "09-10", "12-10", "13-10", "14-10", "15-10", "16-10", "19-10", "20-10"]
     assert rij.loc["13-10", "Klasse"] == "Gesloten" and not bool(rij.loc["13-10", "Vol"])
-    assert rij.loc["14-10", "Klasse"] == "Vol" and bool(rij.loc["14-10", "Vol"])
-    assert rij.loc["15-10", "Klasse_key"] == "k2"
-    assert rij.loc["16-10", "Klasse_key"] == "k4"
+    assert rij.loc["16-10", "Klasse"] == "Vol" and bool(rij.loc["16-10", "Vol"])
+    assert rij.loc["19-10", "Klasse_key"] == "k2"
+    assert rij.loc["20-10", "Klasse_key"] == "k4"
 
 
 def test_vol_volgt_drempel():
     # Precies 95% is Vol (zelfde grens als het advies: alleen < 95% is beschikbaar)
+    # verzinkdag ma 12-10 95% -> leverdatum wo 14-10; verzinkdag di 13-10 90% -> do 15-10
     df = _df({"2026-10-12": 95, "2026-10-13": 90})
-    rij = _tabel(df, _hol(), "2026-10-13")
-    assert rij.loc["12-10", "Klasse"] == "Vol"
-    assert rij.loc["13-10", "Klasse_key"] == "k3"  # 10% van 60 ton = 6.000 kg vrij
-    rij90 = _tabel(df, _hol(), "2026-10-13", vol_drempel_pct=90)
-    assert rij90.loc["13-10", "Klasse"] == "Vol"
+    rij = _tabel(df, _hol(), "2026-10-15")
+    assert rij.loc["14-10", "Klasse"] == "Vol"
+    assert rij.loc["15-10", "Klasse_key"] == "k3"  # 10% van 60 ton = 6.000 kg vrij
+    rij90 = _tabel(df, _hol(), "2026-10-15", vol_drempel_pct=90)
+    assert rij90.loc["15-10", "Klasse"] == "Vol"
