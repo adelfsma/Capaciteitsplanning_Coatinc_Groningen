@@ -1981,6 +1981,8 @@ def bereken_balie_capaciteit(
             )
             if gesloten:
                 label, key = "Gesloten", "gesloten"
+            elif n_werkdagen <= int(altijd_vol_werkdagen):
+                label, key = "Niet beschikbaar", "vol"
             elif vol:
                 label, key = "Vol", "vol"
             else:
