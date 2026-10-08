@@ -24,6 +24,8 @@ from shared import (
     save_daily_snapshot,
     build_otif_trend_df,
     build_dashboard_data,
+    bereken_eerstvolgende_leverdatum,
+    get_advies_config,
     build_productie_dashboard_week,
     build_productie_dashboard_ytd,
     compute_otif,
@@ -635,6 +637,16 @@ _kg_constr_def, _kg_maat_def, _kg_serie_def = get_kg_traverse_defaults()
 kg_per_traverse_constructie = st.sidebar.number_input("KG per traverse Constructie", min_value=100, max_value=10000, value=_kg_constr_def, step=50)
 kg_per_traverse_maatwerk = st.sidebar.number_input("KG per traverse Maatwerk", min_value=100, max_value=10000, value=_kg_maat_def, step=50)
 kg_per_traverse_seriewerk = st.sidebar.number_input("KG per traverse Seriewerk", min_value=100, max_value=10000, value=_kg_serie_def, step=50)
+_advies_cfg = get_advies_config()
+advies_drempel_pct = st.sidebar.slider(
+    "Adviesdrempel eerstvolgende leverdatum (%)",
+    _advies_cfg["drempel_min"], _advies_cfg["drempel_max"],
+    _advies_cfg["drempel_default"], _advies_cfg["drempel_step"],
+    help=(
+        "Een verzinkdag is beschikbaar als de benutting op die dag én het "
+        "gemiddelde van de 2 werkdagen erna onder deze drempel blijven."
+    ),
+)
 default_start = previous_workday(date.today())
 startdatum = st.sidebar.date_input("Startdatum rapport", value=default_start)
 toon_alle_regels = st.sidebar.checkbox("Toon alle regels in controletab", value=True)
@@ -652,6 +664,16 @@ df, df_plan, dag, week, advies_datum = build_dashboard_data(
     capaciteit_kg,
     offset,
     kg_per_traverse_constructie,
+)
+advies = bereken_eerstvolgende_leverdatum(
+    df,
+    holiday_df,
+    capaciteit_kg,
+    advies_drempel_pct,
+    date.today(),
+    verzink_werkdagen=_advies_cfg["verzink_werkdagen"],
+    levering_na_verzinken=_advies_cfg["levering_na_verzinken"],
+    horizon_werkdagen=_advies_cfg["horizon_werkdagen"],
 )
 dag = bereken_aantal_balken(
     dag,
@@ -867,8 +889,32 @@ with tab1:
             unsafe_allow_html=True,
         )
 
-    st.subheader("Eerstvolgende leverdatum")
-    st.markdown(f'<div style="padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid #d0d7de; background-color: #f6f8fa; margin-bottom: 0.75rem;"><div style="font-size: 2.2rem; font-weight: 700;">{advies_datum.strftime("%d-%m-%Y")}</div></div>', unsafe_allow_html=True)
+    st.subheader("Eerstvolgende leverdatum van niet gereserveerde orders")
+    if advies["gevonden"]:
+        _fmt_d = lambda d: f"{['ma','di','wo','do','vr','za','zo'][d.weekday()]} {d.strftime('%d-%m-%Y')}"
+        _pct = lambda v: f"{v:.1f}%".replace(".", ",")
+        _b1, _b2 = advies["buffer_dagen"]
+        _opgeschoven = (
+            f" · {advies['aantal_opgeschoven']} werkdag(en) opgeschoven t.o.v. de standaard "
+            f"verzinkdatum {_fmt_d(advies['vroegste_verzinkdatum'])}"
+            if advies["aantal_opgeschoven"] > 0 else " · standaard levertijd haalbaar"
+        )
+        st.markdown(
+            f'''<div style="padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid #d0d7de; background-color: #f6f8fa; margin-bottom: 0.75rem;">
+                <div style="font-size: 2.2rem; font-weight: 700;">{_fmt_d(advies["leverdatum"])}</div>
+                <div style="font-size: 1rem; color: #475569; margin-top: 0.2rem;">Verzinkdatum: <strong>{_fmt_d(advies["verzinkdatum"])}</strong>{_opgeschoven}</div>
+                <div style="font-size: 0.82rem; color: #64748b; margin-top: 0.35rem;">
+                    Benutting verzinkdag: {_pct(advies["benutting_d"])} · gemiddelde {_b1.strftime("%d-%m")} en {_b2.strftime("%d-%m")}: {_pct(advies["buffer_gemiddelde"])} · drempel {_pct(advies["drempel_pct"])}
+                </div>
+            </div>''',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.warning(
+            f"Geen verzinkdag gevonden binnen {advies['horizon_werkdagen']} werkdagen waarop de "
+            f"benutting én het gemiddelde van de 2 werkdagen erna onder "
+            f"{advies['drempel_pct']:.0f}% blijven."
+        )
 
     st.subheader("Capaciteit versus dagbelasting op verzinkdatum")
     st.pyplot(make_professional_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
