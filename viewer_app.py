@@ -773,7 +773,7 @@ def _render_balie(capaciteit_kg: float, drempel_pct: float, startdatum, kg_per_t
             verzink_werkdagen=cfg["verzink_werkdagen"],
             levering_na_verzinken=cfg["levering_na_verzinken"],
             horizon_werkdagen=cfg["horizon_werkdagen"],
-            buffer_werkdagen=cfg["buffer_werkdagen"],
+            terugschuif_werkdagen=cfg["terugschuif_werkdagen"],
         )
         hol_set = set(holiday_b["Datum"].tolist()) if not holiday_b.empty else set()
         # Tabel t/m vandaag + 15 werkdagen (instelbaar), maar altijd minstens
@@ -785,7 +785,7 @@ def _render_balie(capaciteit_kg: float, drempel_pct: float, startdatum, kg_per_t
             df_b, holiday_b, capaciteit_kg, vandaag, tot, vol_drempel_pct=drempel_pct,
             altijd_vol_werkdagen=cfg["balie_altijd_vol_werkdagen"],
             levering_na_verzinken=cfg["levering_na_verzinken"],
-            buffer_werkdagen=cfg["buffer_werkdagen"],
+            terugschuif_werkdagen=cfg["terugschuif_werkdagen"],
         )
     except Exception:
         st.markdown(
@@ -901,8 +901,9 @@ advies_drempel_pct = st.sidebar.slider(
     _advies_cfg["drempel_min"], _advies_cfg["drempel_max"],
     _advies_cfg["drempel_default"], _advies_cfg["drempel_step"],
     help=(
-        "Een verzinkdag is beschikbaar als de benutting op die dag én het "
-        f"gemiddelde van de {_advies_cfg['buffer_werkdagen']} werkdagen erna onder deze drempel blijven."
+        "Een verzinkdag is beschikbaar als de benutting op die dag, inclusief "
+        f"belasting na het terugschuiven van pieken (max. {_advies_cfg['terugschuif_werkdagen']} werkdagen) "
+        "onder deze drempel blijft."
     ),
 )
 default_start = previous_workday(date.today())
@@ -932,7 +933,7 @@ advies = bereken_eerstvolgende_leverdatum(
     verzink_werkdagen=_advies_cfg["verzink_werkdagen"],
     levering_na_verzinken=_advies_cfg["levering_na_verzinken"],
     horizon_werkdagen=_advies_cfg["horizon_werkdagen"],
-    buffer_werkdagen=_advies_cfg["buffer_werkdagen"],
+    terugschuif_werkdagen=_advies_cfg["terugschuif_werkdagen"],
 )
 dag = bereken_aantal_balken(
     dag,
@@ -1159,7 +1160,6 @@ with tab1:
     if advies["gevonden"]:
         _fmt_d = lambda d: f"{['ma','di','wo','do','vr','za','zo'][d.weekday()]} {d.strftime('%d-%m-%Y')}"
         _pct = lambda v: f"{v:.1f}%".replace(".", ",")
-        _b1, _b2 = advies["buffer_dagen"][0], advies["buffer_dagen"][-1]
         _opgeschoven = (
             f" · {advies['aantal_opgeschoven']} werkdag(en) opgeschoven t.o.v. de standaard "
             f"verzinkdatum {_fmt_d(advies['vroegste_verzinkdatum'])}"
@@ -1170,7 +1170,7 @@ with tab1:
                 <div style="font-size: 2.2rem; font-weight: 700;">{_fmt_d(advies["leverdatum"])} <span style="font-size: 1.1rem; font-weight: 500; color: #475569;">({advies["levertijd_werkdagen"]} werkdagen)</span></div>
                 <div style="font-size: 1rem; color: #475569; margin-top: 0.2rem;">Verzinkdatum: <strong>{_fmt_d(advies["verzinkdatum"])}</strong>{_opgeschoven}</div>
                 <div style="font-size: 0.82rem; color: #64748b; margin-top: 0.35rem;">
-                    Benutting verzinkdag: {_pct(advies["benutting_d"])} · gemiddelde {_b1.strftime("%d-%m")} t/m {_b2.strftime("%d-%m")}: {_pct(advies["buffer_gemiddelde"])} · drempel {_pct(advies["drempel_pct"])}
+                    Benutting verzinkdag na terugschuiven van pieken: {_pct(advies["benutting_d"])} (eigen orders: {_pct(advies["benutting_d_origineel"])}) · drempel {_pct(advies["drempel_pct"])}
                 </div>
             </div>''',
             unsafe_allow_html=True,
@@ -1178,8 +1178,7 @@ with tab1:
     else:
         st.warning(
             f"Geen verzinkdag gevonden binnen {advies['horizon_werkdagen']} werkdagen waarop de "
-            f"benutting én het gemiddelde van de {advies['buffer_werkdagen']} werkdagen erna onder "
-            f"{advies['drempel_pct']:.0f}% blijven."
+            f"benutting (na terugschuiven van pieken) onder {advies['drempel_pct']:.0f}% blijft."
         )
 
     st.subheader("Capaciteit versus dagbelasting op verzinkdatum")

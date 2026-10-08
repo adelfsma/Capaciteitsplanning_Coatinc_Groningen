@@ -1,4 +1,4 @@
-"""Tests voor eerstvolgende leverdatum en balie-capaciteit (v2.5.21)."""
+"""Tests voor eerstvolgende leverdatum en balie-capaciteit (v2.5.22)."""
 from datetime import date
 
 import pandas as pd
@@ -45,37 +45,41 @@ def test_leeg_standaard_levertijd():
     assert r["levertijd_werkdagen"] == 5
 
 
-def test_voorbeeld_buffer_3_dagen():
-    # D=13: buffer 14/15/16 = 98/97/94 -> gem 96,3 -> schuift
-    # D=14 (98) en D=15 (97) vallen zelf al af
-    # D=16: 94, buffer 19/20/21 = 85/0/0 -> akkoord
-    df = _df({
-        "2026-10-13": 92, "2026-10-14": 98, "2026-10-15": 97,
-        "2026-10-16": 94, "2026-10-19": 85,
-    })
+def test_piek_wordt_teruggeschoven():
+    # vr 16-10 140%: 45% boven de drempel schuift terug naar 15, 14 en 13-10
+    # (elk 80% -> 95%). Daarmee zijn 13 t/m 16-10 vol; eerste vrije dag ma 19-10.
+    df = _df({"2026-10-13": 80, "2026-10-14": 80, "2026-10-15": 80, "2026-10-16": 140})
     r = _run(df)
-    assert r["verzinkdatum"] == pd.Timestamp("2026-10-16")
-    assert r["leverdatum"] == pd.Timestamp("2026-10-20")
-    assert r["buffer_dagen"] == (
-        pd.Timestamp("2026-10-19"), pd.Timestamp("2026-10-20"), pd.Timestamp("2026-10-21"),
-    )
-    assert r["aantal_opgeschoven"] == 3
-    assert r["levertijd_werkdagen"] == 8
+    assert r["verzinkdatum"] == pd.Timestamp("2026-10-19")
+    assert r["leverdatum"] == pd.Timestamp("2026-10-21")
+    assert r["aantal_opgeschoven"] == 4  # 13, 14, 15 en 16-10 vol
 
 
-def test_d_zelf_telt_niet_mee_in_gemiddelde():
-    # D=94, buffer 96/96/92 -> gemiddelde 94,7 < 95 -> akkoord
-    r = _run(_df({"2026-10-13": 94, "2026-10-14": 96, "2026-10-15": 96, "2026-10-16": 92}))
-    assert r["verzinkdatum"] == pd.Timestamp("2026-10-13")
+def test_terugschuiven_max_3_werkdagen():
+    # vr 16-10 150%: 55% over. 15/14/13-10 (90%) nemen elk 5% op, de
+    # resterende 40% blijft op 16-10. Ma 12-10 (4 werkdagen terug) krijgt niets.
+    df = _df({"2026-10-12": 80, "2026-10-13": 90, "2026-10-14": 90, "2026-10-15": 90, "2026-10-16": 150})
+    r = _run(df)
+    assert r["verzinkdatum"] == pd.Timestamp("2026-10-19")
+    rij = _tabel(df, _hol(), "2026-10-20", altijd_vol_werkdagen=0)
+    assert rij.loc["14-10", "Verzinkdatum"] == pd.Timestamp("2026-10-12")
+    assert rij.loc["14-10", "Klasse_key"] == "k4"  # 12-10 blijft 80% -> 12.000 kg vrij
 
 
-def test_derde_bufferdag_telt_mee():
-    # Met 2 bufferdagen zou D=13 akkoord zijn (gem 90); de derde dag (99)
-    # trekt het gemiddelde naar 93 -> nog akkoord; bij 105 -> 95 -> schuift.
-    assert _run(_df({"2026-10-14": 90, "2026-10-15": 90, "2026-10-16": 99}))["verzinkdatum"] \
-        == pd.Timestamp("2026-10-13")
-    assert _run(_df({"2026-10-14": 90, "2026-10-15": 90, "2026-10-16": 105}))["verzinkdatum"] \
-        != pd.Timestamp("2026-10-13")
+def test_piek_schuift_niet_naar_later():
+    # Piek op 19-10 mag niet naar 20-10 (dat zou te laat zijn): 20-10 blijft vrij
+    # 13-10 95% (vol), 14-16-10 94% -> na terugschuiven 95% (vol), 19-10 houdt 137%
+    df = _df({"2026-10-13": 95, "2026-10-14": 94, "2026-10-15": 94, "2026-10-16": 94, "2026-10-19": 140})
+    r = _run(df)
+    assert r["verzinkdatum"] == pd.Timestamp("2026-10-20")
+
+
+def test_piek_schuift_niet_naar_verleden():
+    # Piek op vr 09-10 kan alleen naar do 08-10 (vandaag), niet naar 07-10
+    df = _df({"2026-10-07": 0, "2026-10-08": 0, "2026-10-09": 250})
+    rij = _tabel(df, _hol(), "2026-10-13", altijd_vol_werkdagen=0)
+    # leverdatum 12-10 <- verzinkdag 08-10: vol door teruggeschoven piek
+    assert rij.loc["12-10", "Klasse"] == "Vol"
 
 
 def test_grens_95_is_niet_akkoord():
@@ -189,23 +193,23 @@ def test_vol_volgt_drempel():
     assert rij90.loc["16-10", "Klasse"] == "Vol"
 
 
-def test_piek_na_verzinkdag_maakt_vol_en_tabel_sluit_aan_op_advies():
-    # Situatie uit de export van 08-10 (benutting t.o.v. capaciteit):
-    # piek op ma 19-10 (165%) maakt verzinkdag vr 16-10 (84%) ook vol,
-    # want gemiddelde 19/20/21-10 = 118%. Zelfde regel als het advies.
+def test_export_0810_60_ton():
+    # Situatie uit de export van 08-10 bij 60 ton (benutting t.o.v. capaciteit).
+    # Piek ma 19-10 (137%) schuift terug: 16-10 -> 95%, 15-10 -> 95%, rest naar 14-10.
     benut = {
-        "2026-10-12": 94.4, "2026-10-13": 97.3, "2026-10-14": 83.2, "2026-10-15": 99.2,
-        "2026-10-16": 84.2, "2026-10-19": 164.6, "2026-10-20": 84.0, "2026-10-21": 105.6,
-        "2026-10-22": 61.4, "2026-10-23": 85.6, "2026-10-26": 91.2, "2026-10-27": 75.0,
-        "2026-10-28": 75.6,
+        "2026-10-12": 78.7, "2026-10-13": 81.1, "2026-10-14": 69.3, "2026-10-15": 82.7,
+        "2026-10-16": 70.2, "2026-10-19": 137.2, "2026-10-20": 70.0, "2026-10-21": 88.0,
+        "2026-10-22": 51.2,
     }
     df = _df(benut)
-    rij = _tabel(df, _hol(), "2026-10-27")
-    assert rij.loc["16-10", "Klasse"] == "Vol"   # verzinkdag 14-10: gem. 15/16/19 = 116%
-    assert rij.loc["20-10", "Klasse"] == "Vol"   # verzinkdag 16-10: gem. 19/20/21 = 118%
-    assert rij.loc["22-10", "Klasse_key"] == "k3"  # verzinkdag 20-10: 84%, gem. 84%
+    rij = _tabel(df, _hol(), "2026-10-26")
+    assert rij.loc["15-10", "Klasse_key"] == "k4"  # verzinkdag 13-10: 81%
+    assert rij.loc["16-10", "Klasse_key"] == "k4"  # verzinkdag 14-10: 69% + rest piek = 74%
+    assert rij.loc["19-10", "Klasse"] == "Vol"     # verzinkdag 15-10: 95% na terugschuiven
+    assert rij.loc["20-10", "Klasse"] == "Vol"     # verzinkdag 16-10: 95%
+    assert rij.loc["21-10", "Klasse"] == "Vol"     # verzinkdag 19-10: 95%
+    assert rij.loc["22-10", "Klasse_key"] == "k4"  # verzinkdag 20-10: 70%
     adv = _run(df)
-    assert adv["leverdatum"] == pd.Timestamp("2026-10-22")
-    # Eerste beschikbare regel in de tabel = eerstvolgende leverdatum
+    assert adv["leverdatum"] == pd.Timestamp("2026-10-15")
     beschikbaar = rij[~rij["Vol"] & ~rij["Gesloten"]]
-    assert beschikbaar.index[0] == "22-10"
+    assert beschikbaar.index[0] == "15-10"
