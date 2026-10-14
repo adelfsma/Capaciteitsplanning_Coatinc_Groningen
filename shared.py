@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.22"
+APP_VERSION = "v2.5.23"
 
 
 def get_app_environment() -> str:
@@ -199,6 +199,11 @@ SCHEEPSLEIDINGEN_FILE = "scheepsleidingen.xlsx"
 # gewicht per traverse. Wordt door het Productie-dashboard gebruikt. Optioneel:
 # ontbreekt het bestand, dan blijven de MIS-kolommen leeg in het dashboard.
 MIS_FILE = "mis.xlsx"
+# Orderregel-export uit 2G (kolommen OrderID, Subbonnummer V, aantal). Levert het
+# aantal te verzinken stuks per deelorder voor de stuksplanning. Alleen in de
+# lijst met optionele bestanden als [locatie] stuks_planning = true.
+ORDERREGEL_FILE = "Orderregels.xlsx"
+ORDERREGEL_KOLOMMEN = ["OrderID", "Subbonnummer V", "aantal"]
 _BASE_OPTIONAL_FILES = ["Export_CGS.xlsx", DEBTOR_EXPORT_FILE, SCHEEPSLEIDINGEN_FILE, MIS_FILE]
 
 OPTIONAL_FILE_LABELS = {
@@ -206,6 +211,7 @@ OPTIONAL_FILE_LABELS = {
     DEBTOR_EXPORT_FILE: "Upload debtor-export.xlsx (optioneel – segment/type materiaal per klant)",
     SCHEEPSLEIDINGEN_FILE: "Upload scheepsleidingen.xlsx (optioneel – klanten met 24-uursservice; worden als depot behandeld)",
     MIS_FILE: "Upload mis.xlsx (optioneel – cumulatieve MIS-export voor het productie-dashboard)",
+    ORDERREGEL_FILE: "Upload Orderregels.xlsx (optioneel – 2G orderregel-export voor de stuksplanning)",
     "feestdagen.xlsx": "Upload feestdagen.xlsx (optioneel voor deze vestiging – feestdagenkalender)",
     "Export+1.xlsx": "Upload Export+1.xlsx (optioneel voor deze vestiging)",
     "Export+2.xlsx": "Upload Export+2.xlsx (optioneel voor deze vestiging)",
@@ -248,6 +254,12 @@ RESERVERING_WINDOW_NA   = 40   # dagen na vandaag
 # otif_uitsluiten_statussen = ""                      # komma-gescheiden EXTRA statussen buiten OTIF (UB is al altijd uitgesloten, hoeft hier niet)
 # otif_uitsluiten_klanten = ""                        # komma-gescheiden klantnamen (Klantnaam) volledig buiten OTIF, bijv. "Kubo Greenhouse Projects B.V."
 # verplichte_bestanden = ""                           # kleinere vereiste set, bijv. "OrderExport2G.xlsx, Export-1.xlsx, Export.xlsx"
+# stuks_planning = false                              # true = extra planning op aantal te verzinken stuks (vereist Orderregels.xlsx)
+# stuks_capaciteit_min = 1000                         # stukscapaciteit-slider (stuks/dag): minimum
+# stuks_capaciteit_max = 8000                         # stukscapaciteit-slider (stuks/dag): maximum
+# stuks_capaciteit_default = 3200                     # stukscapaciteit-slider (stuks/dag): startwaarde
+# stuks_capaciteit_step = 100                         # stukscapaciteit-slider: stapgrootte
+# kg_per_stuk_default = 34                            # schatting kg/stuk als klant te weinig historie heeft
 
 _LOCATIE_DEFAULTS = {
     "naam": "Coatinc Groningen",
@@ -339,6 +351,35 @@ def get_kg_traverse_defaults() -> tuple[int, int, int]:
         int(_get_locatie_number("kg_traverse_maatwerk", 840)),
         int(_get_locatie_number("kg_traverse_seriewerk", 930)),
     )
+
+
+def get_stuks_planning_actief() -> bool:
+    """True als de planning op aantal te verzinken stuks actief is.
+    Zet in secrets: [locatie] stuks_planning = true. Standaard uit, zodat
+    Groningen ongewijzigd blijft."""
+    val = _get_locatie_setting("stuks_planning", "false")
+    return str(val).strip().lower() in ("true", "1", "ja", "yes", "aan")
+
+
+def get_stuks_capaciteit_config() -> tuple[int, int, int, int]:
+    """(min, max, default, step) voor de stukscapaciteit-slider (stuks per dag).
+    Default 3.200 ≈ 52 traverses × ≈61 stuks (Alblasserdam 2026, O+M).
+    Instelbaar via [locatie]: stuks_capaciteit_min / _max / _default / _step."""
+    mn = int(_get_locatie_number("stuks_capaciteit_min", 1000))
+    mx = int(_get_locatie_number("stuks_capaciteit_max", 8000))
+    step = int(_get_locatie_number("stuks_capaciteit_step", 100))
+    default = int(_get_locatie_number("stuks_capaciteit_default", 3200))
+    if mx < mn:
+        mn, mx = mx, mn
+    default = min(max(default, mn), mx)
+    return mn, mx, default, max(step, 1)
+
+
+def get_kg_per_stuk_default() -> float:
+    """Kg per stuk waarmee stuks worden geschat als er geen orderregels zijn en
+    de klant te weinig historie heeft. Default 34 (gemiddelde CAL 2026)."""
+    val = float(_get_locatie_number("kg_per_stuk_default", 34))
+    return val if val > 0 else 34.0
 
 
 def get_otif_uitsluiten_statussen() -> set:
@@ -482,6 +523,14 @@ def _split_required_optional(raw: str) -> tuple[list, list]:
     return required, optional
 
 
+def _add_stuks_file(required: list, optional: list, actief: bool) -> tuple[list, list]:
+    """Pure helper: voeg Orderregels.xlsx toe aan de optionele bestanden als de
+    stuksplanning actief is."""
+    if actief and ORDERREGEL_FILE not in required and ORDERREGEL_FILE not in optional:
+        optional = list(optional) + [ORDERREGEL_FILE]
+    return required, optional
+
+
 def _compute_file_lists() -> tuple[list, list]:
     """Bepaal (REQUIRED_FILES, OPTIONAL_FILES) voor deze vestiging.
 
@@ -490,7 +539,8 @@ def _compute_file_lists() -> tuple[list, list]:
         verplichte_bestanden = "OrderExport2G.xlsx, Export-1.xlsx, Export.xlsx"
     De overige standaard-vereiste bestanden verschuiven dan naar optioneel.
     OrderExport2G.xlsx blijft altijd vereist (harde afhankelijkheid)."""
-    return _split_required_optional(_get_locatie_setting("verplichte_bestanden", ""))
+    required, optional = _split_required_optional(_get_locatie_setting("verplichte_bestanden", ""))
+    return _add_stuks_file(required, optional, get_stuks_planning_actief())
 
 
 # Definitieve, per-vestiging bepaalde bestandslijsten (door manager- en viewer-app
@@ -815,6 +865,15 @@ def validate_mis_xlsx(file_path: Path) -> bool:
     parsed = pd.to_datetime(df["Datum"], errors="coerce")
     if parsed.isna().all():
         raise ValueError(f"{MIS_FILE}: geen geldige datums gevonden in kolom 'Datum'.")
+    return True
+
+
+def validate_orderregels_xlsx(file_path: Path) -> bool:
+    """Controleer of de orderregel-export de kolommen voor de stuksplanning bevat."""
+    df = pd.read_excel(file_path, nrows=5)
+    missing = [c for c in ORDERREGEL_KOLOMMEN if c not in df.columns]
+    if missing:
+        raise ValueError(f"{ORDERREGEL_FILE} mist kolommen: {', '.join(missing)}")
     return True
 
 
@@ -1232,6 +1291,109 @@ def _build_reserveringen(order: pd.DataFrame, cgs_ordernummers: set) -> pd.DataF
     return reserveringen
 
 
+# ── Stuksplanning (aantal te verzinken stuks) ─────────────────────────────────
+# Bron: 2G orderregel-export (Orderregels.xlsx). Stuks per deelorder = som van
+# 'aantal' per 'Subbonnummer V'; dat sluit aan op 'Nummer' in de weekexports
+# (bijv. 202621329V1, 202615707VC1-V). Reserveringen en regels zonder
+# orderregels krijgen een schatting: gewicht ÷ kg-per-stuk van de klant
+# (mediaan over zijn gewogen deelorders) of anders de vestigingsdefault.
+
+STUKS_MIN_ORDERS_KLANT = 3          # min. gewogen deelorders met stuks voor een klantratio
+KG_PER_STUK_MIN = 1.0               # ondergrens klantratio (kg/stuk)
+KG_PER_STUK_MAX = 1000.0            # bovengrens klantratio (kg/stuk)
+STUKS_BRON_ORDERREGEL = "Orderregel"
+STUKS_BRON_KLANT = "Geschat (klant kg/stuk)"
+STUKS_BRON_DEFAULT = "Geschat (standaard kg/stuk)"
+
+def _norm_deelorder(series: pd.Series) -> pd.Series:
+    return series.astype(str).str.strip().str.upper()
+
+
+def stuks_uit_orderregels(orderregels: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """Pure helper: (stuks per deelorder, stuks per order) uit de orderregel-export.
+    Index van de eerste Series = genormaliseerd 'Subbonnummer V', van de tweede
+    = OrderID (int)."""
+    if orderregels is None or orderregels.empty:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+    r = orderregels.copy()
+    r["aantal"] = coerce_numeric(r["aantal"]).fillna(0).clip(lower=0)
+    met_v = r[r["Subbonnummer V"].notna()].copy()
+    met_v["_deel"] = _norm_deelorder(met_v["Subbonnummer V"])
+    per_deel = met_v.groupby("_deel")["aantal"].sum()
+    per_order = met_v.assign(_order=coerce_numeric(met_v["OrderID"])).groupby("_order")["aantal"].sum()
+    return per_deel, per_order
+
+
+def _norm_klant(series: pd.Series) -> pd.Series:
+    return series.fillna("").astype(str).str.strip().str.strip('"').str.lower()
+
+
+def bereken_kg_per_stuk_per_klant(
+    df: pd.DataFrame,
+    stuks_werkelijk: pd.Series,
+    min_deelorders: int = STUKS_MIN_ORDERS_KLANT,
+) -> pd.Series:
+    """Pure helper: mediaan kg/stuk per klant (index = genormaliseerde
+    Klantnaam) over deelorders met een GEWOGEN gewicht (Gewicht_export_kg > 0)
+    én een aantal uit de orderregels. Het 2G-ordergewicht wordt bewust niet
+    gebruikt: dat is vaak een placeholder (10 kg, 1 ton) en geeft onzinratio's.
+    De mediaan voorkomt dat één deelorder met duizenden kleine delen de ratio
+    bepaalt; de uitkomst wordt begrensd op [KG_PER_STUK_MIN, KG_PER_STUK_MAX]."""
+    if "Klantnaam" not in df.columns or "Gewicht_export_kg" not in df.columns:
+        return pd.Series(dtype=float)
+    kg = coerce_numeric(df["Gewicht_export_kg"])
+    stuks = pd.to_numeric(stuks_werkelijk, errors="coerce")
+    basis = pd.DataFrame({"klant": _norm_klant(df["Klantnaam"]), "kg": kg, "stuks": stuks})
+    basis = basis[(basis["kg"] > 0) & (basis["stuks"] > 0) & (basis["klant"] != "")]
+    if basis.empty:
+        return pd.Series(dtype=float)
+    basis["kps"] = basis["kg"] / basis["stuks"]
+    g = basis.groupby("klant")["kps"].agg(["median", "size"])
+    return g.loc[g["size"] >= min_deelorders, "median"].clip(KG_PER_STUK_MIN, KG_PER_STUK_MAX)
+
+
+def koppel_stuks(
+    merged: pd.DataFrame,
+    orderregels: pd.DataFrame | None,
+    kg_per_stuk_default: float,
+) -> pd.DataFrame:
+    """Voeg kolommen Stuks, Stuks_bron en Kg_per_stuk_gebruikt toe aan merged.
+
+    1. Deelorder komt voor in de orderregels (op Nummer) → werkelijk aantal.
+    2. Anders schatting: Gewicht_effectief_kg ÷ kg/stuk van de klant (mediaan
+       over gewogen deelorders, min. STUKS_MIN_ORDERS_KLANT), anders
+       ÷ kg_per_stuk_default. Dit geldt o.a. voor alle reserveringen (daar
+       staan geen aantallen in).
+    """
+    df = merged.copy()
+    per_deel, _ = stuks_uit_orderregels(orderregels)
+    nummer = _norm_deelorder(df["Nummer"]) if "Nummer" in df.columns else pd.Series("", index=df.index)
+    is_reservering = (
+        df["Gewicht_bron"].eq("Reservering") if "Gewicht_bron" in df.columns
+        else pd.Series(False, index=df.index)
+    )
+    werkelijk = nummer.map(per_deel).where(~is_reservering)
+
+    klant_ratio = bereken_kg_per_stuk_per_klant(df, werkelijk)
+    if "Klantnaam" in df.columns and not klant_ratio.empty:
+        ratio_klant = _norm_klant(df["Klantnaam"]).map(klant_ratio)
+    else:
+        ratio_klant = pd.Series(np.nan, index=df.index)
+
+    kg = coerce_numeric(df.get("Gewicht_effectief_kg", pd.Series(0.0, index=df.index))).fillna(0)
+    ratio = ratio_klant.fillna(float(kg_per_stuk_default))
+    geschat = np.where(kg > 0, np.maximum(1, np.round(kg / ratio)), 0)
+
+    heeft_werkelijk = werkelijk.notna() & (werkelijk > 0)
+    df["Stuks"] = np.where(heeft_werkelijk, werkelijk, geschat).astype(float)
+    df["Stuks_bron"] = np.where(
+        heeft_werkelijk, STUKS_BRON_ORDERREGEL,
+        np.where(ratio_klant.notna(), STUKS_BRON_KLANT, STUKS_BRON_DEFAULT),
+    )
+    df["Kg_per_stuk_gebruikt"] = np.where(heeft_werkelijk, np.nan, ratio.round(1))
+    return df
+
+
 @st.cache_data(ttl=60, show_spinner="Data laden uit de cloud…")
 def load_published_data():
     """
@@ -1473,6 +1635,21 @@ def load_published_data():
             "Aantal_regels_ingelezen": len(debtor_lookup),
         })
 
+    # ── 7b. Aantal te verzinken stuks (alleen als stuksplanning actief) ────
+    if get_stuks_planning_actief():
+        orderregel_fp = tmp / ORDERREGEL_FILE
+        orderregels = (
+            pd.read_excel(orderregel_fp, usecols=lambda c: c in ORDERREGEL_KOLOMMEN)
+            if orderregel_fp.exists() else None
+        )
+        merged = koppel_stuks(merged, orderregels, get_kg_per_stuk_default())
+        if orderregels is not None:
+            export_file_summary.append({
+                "Bronbestand": ORDERREGEL_FILE,
+                "Bron_week": "stuks",
+                "Aantal_regels_ingelezen": len(orderregels),
+            })
+
     # ── 8. Feestdagen opschonen ───────────────────────────────────────────
     holiday_df["Datum"] = pd.to_datetime(holiday_df["Datum"], errors="coerce").dt.date
     holiday_df = (
@@ -1618,7 +1795,12 @@ def build_dashboard_data(
     capaciteit_kg: int,
     offset: int,
     kg_per_traverse: int,
+    capaciteit_stuks: int | None = None,
 ):
+    """capaciteit_stuks: max. aantal te verzinken stuks per dag. Alleen gebruikt
+    als de data een kolom 'Stuks' heeft (stuksplanning actief); dan krijgen dag-
+    en weekoverzicht de kolommen Stuks*, Capaciteit_stuks, Benutting_stuks_pct
+    en Status_stuks."""
     holiday_dates = set(holiday_df["Datum"].tolist())
     df = df_raw.copy()
 
@@ -1692,14 +1874,31 @@ def build_dashboard_data(
         0.0,
     )
 
+    heeft_stuks = "Stuks" in df_plan.columns
+    dag_agg = {
+        "Gewicht_kg": ("Gewicht_effectief_kg", "sum"),
+        "Gewicht_definitief_kg": ("Gewicht_definitief_kg", "sum"),
+        "Gewicht_reservering_kg": ("Gewicht_reservering_kg", "sum"),
+        "Aantal_orders_te_verzinken": ("Nummer", "count"),
+    }
+    if heeft_stuks:
+        df_plan["Stuks"] = pd.to_numeric(df_plan["Stuks"], errors="coerce").fillna(0.0)
+        is_res = df_plan["Gewicht_bron"] == "Reservering"
+        df_plan["Stuks_definitief"] = np.where(~is_res, df_plan["Stuks"], 0.0)
+        df_plan["Stuks_reservering"] = np.where(is_res, df_plan["Stuks"], 0.0)
+        df_plan["Stuks_geschat"] = np.where(
+            df_plan["Stuks_bron"] != STUKS_BRON_ORDERREGEL, df_plan["Stuks"], 0.0
+        )
+        dag_agg.update({
+            "Stuks": ("Stuks", "sum"),
+            "Stuks_definitief": ("Stuks_definitief", "sum"),
+            "Stuks_reservering": ("Stuks_reservering", "sum"),
+            "Stuks_geschat": ("Stuks_geschat", "sum"),
+        })
+
     horizon = build_horizon_and_include_holidays(start_ts, 10, holiday_dates)
 
-    dag_orders = df_plan.groupby("Verzinkdatum", as_index=False).agg(
-        Gewicht_kg=("Gewicht_effectief_kg", "sum"),
-        Gewicht_definitief_kg=("Gewicht_definitief_kg", "sum"),
-        Gewicht_reservering_kg=("Gewicht_reservering_kg", "sum"),
-        Aantal_orders_te_verzinken=("Nummer", "count"),
-    )
+    dag_orders = df_plan.groupby("Verzinkdatum", as_index=False).agg(**dag_agg)
 
     # Uitsplitsing tonnage per materiaaltype/segment. Dit is bewust los van
     # definitief/reservering, zodat de bestaande grafiek intact blijft en de
@@ -1754,6 +1953,23 @@ def build_dashboard_data(
         np.nan,
     )
     dag["Traverses_berekend"] = np.ceil(dag["Gewicht_kg"] / kg_per_traverse)
+    if heeft_stuks:
+        for col in ["Stuks", "Stuks_definitief", "Stuks_reservering", "Stuks_geschat"]:
+            dag[col] = dag[col].fillna(0.0)
+        dag["Capaciteit_stuks"] = np.where(
+            dag["Is_feestdag_of_sluiting"], 0, int(capaciteit_stuks or 0)
+        )
+        dag["Benutting_stuks_pct"] = np.where(
+            dag["Capaciteit_stuks"] > 0,
+            (dag["Stuks"] / dag["Capaciteit_stuks"].where(dag["Capaciteit_stuks"] > 0)) * 100,
+            np.nan,
+        )
+        dag["Kg_per_stuk"] = np.where(
+            dag["Stuks"] > 0, dag["Gewicht_kg"] / dag["Stuks"].where(dag["Stuks"] > 0), np.nan
+        )
+        dag["Status_stuks"] = dag.apply(
+            lambda r: stoplight(r["Benutting_stuks_pct"], r["Is_feestdag_of_sluiting"]), axis=1
+        )
     dag["Status"]   = dag.apply(
         lambda r: stoplight(r["Benutting_pct"], r["Is_feestdag_of_sluiting"]), axis=1
     )
@@ -1774,8 +1990,18 @@ def build_dashboard_data(
     }
     for col in MATERIAALTYPE_DAG_COLS.values():
         week_agg[col] = (col, "sum")
+    if heeft_stuks:
+        for col in ["Stuks", "Stuks_definitief", "Stuks_reservering", "Stuks_geschat", "Capaciteit_stuks"]:
+            week_agg[col] = (col, "sum")
 
     week = dag.groupby(["Jaar", "Week"], as_index=False).agg(**week_agg)
+    if heeft_stuks:
+        week["Benutting_stuks_pct"] = np.where(
+            week["Capaciteit_stuks"] > 0,
+            (week["Stuks"] / week["Capaciteit_stuks"].where(week["Capaciteit_stuks"] > 0)) * 100,
+            np.nan,
+        )
+        week["Status_stuks"] = week["Benutting_stuks_pct"].apply(lambda x: stoplight(x, False))
     week["Benutting_pct"] = np.where(
         week["Capaciteit_kg"] > 0,
         (week["Gewicht_kg"] / week["Capaciteit_kg"]) * 100,

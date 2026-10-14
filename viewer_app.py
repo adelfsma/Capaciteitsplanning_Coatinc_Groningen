@@ -45,6 +45,8 @@ from shared import (
     get_poetsen_otif_actief,
     get_max_capaciteit_config,
     get_kg_traverse_defaults,
+    get_stuks_planning_actief,
+    get_stuks_capaciteit_config,
     get_otif_uitsluiten_statussen,
     get_otif_uitsluiten_klanten,
     get_beheer_wachtwoord,
@@ -230,6 +232,78 @@ def make_professional_matplotlib_chart(day_df: pd.DataFrame):
         if r > ymax * 0.06:
             ax.text(i, d + r / 2, format_int(r), ha="center", va="center", fontsize=7, color="white")
     # Extra top-marge zodat de legenda tussen titel en plot past.
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    return fig
+
+
+def make_stuks_matplotlib_chart(day_df: pd.DataFrame):
+    """Stuks versus stukscapaciteit per verzinkdatum, zelfde opmaak als de
+    kg-grafiek: capaciteit als achtergrondbalk, bevestigd + reservering
+    gestapeld. Onderaan per dag het gemiddelde kg/stuk (mix-indicator)."""
+    plot_df = day_df.copy()
+    labels = plot_df["Label_nl"].tolist()
+    x = np.arange(len(plot_df))
+    capacity    = plot_df["Capaciteit_stuks"].astype(float).tolist()
+    definitief  = plot_df["Stuks_definitief"].astype(float).tolist()
+    reservering = plot_df["Stuks_reservering"].astype(float).tolist()
+    load        = plot_df["Stuks"].astype(float).tolist()
+    kg_per_stuk = plot_df["Kg_per_stuk"].tolist()
+    is_holiday  = plot_df["Is_feestdag_of_sluiting"].tolist()
+
+    BLAUW  = "#2E75B6"
+    ORANJE = "#F4A623"
+    GRIJS  = "#BDD7EE"
+
+    fig, ax = plt.subplots(figsize=(11, 4.8))
+    for i, holiday in enumerate(is_holiday):
+        if holiday:
+            ax.axvspan(i - 0.5, i + 0.5, alpha=0.12, color="red", zorder=0)
+
+    ax.bar(x, capacity, width=0.56, color=GRIJS, alpha=0.6, label="Capaciteit (stuks)", zorder=2)
+    ax.bar(x, definitief, width=0.36, color=BLAUW, label="Bevestigde orders", zorder=3)
+    ax.bar(x, reservering, width=0.36, bottom=definitief, color=ORANJE,
+           label="Reserveringen (geschat)", zorder=3)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right", rotation_mode="anchor")
+    ax.set_ylabel("Stuks")
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, position: format_int(value)))
+    ax.grid(axis="y", alpha=0.25)
+    ax.set_axisbelow(True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_alpha(0.3)
+    ax.spines["bottom"].set_alpha(0.3)
+    handles, legend_labels = ax.get_legend_handles_labels()
+    ax.legend(handles, legend_labels, loc="lower center", bbox_to_anchor=(0.5, 1.02),
+              ncols=len(handles), frameon=False, fontsize=9)
+
+    ymax = max(max(capacity) if capacity else 0, max(load) if load else 0) * 1.15
+    if ymax <= 0:
+        ymax = 1
+    ax.set_ylim(0, ymax)
+
+    for i, val in enumerate(load):
+        if val > 0:
+            ax.text(i, val + ymax * 0.015, format_int(val), ha="center", va="bottom",
+                    fontsize=8, fontweight="bold")
+    # Segmentlabels alleen als ze boven de kg/stuk-rij onderaan uitkomen.
+    for i, (d, r) in enumerate(zip(definitief, reservering)):
+        if d > ymax * 0.06 and d / 2 > ymax * 0.09:
+            ax.text(i, d / 2, format_int(d), ha="center", va="center", fontsize=7, color="white")
+        if r > ymax * 0.06 and d + r / 2 > ymax * 0.09:
+            ax.text(i, d + r / 2, format_int(r), ha="center", va="center", fontsize=7, color="white")
+
+    # Gemiddeld kg/stuk per dag in een vaste rij onderaan (zelfde stijl als de
+    # balkenlabels in de kg-grafiek, maar grijs).
+    trans = ax.get_xaxis_transform()
+    for i, kps in enumerate(kg_per_stuk):
+        if pd.notna(kps) and load[i] > 0:
+            ax.text(i, 0.02, f"{kps:.0f} kg/st", transform=trans, ha="center", va="bottom",
+                    fontsize=7, color="#404040",
+                    bbox={"boxstyle": "round,pad=0.2", "facecolor": "white",
+                          "edgecolor": "#808080", "linewidth": 0.6, "alpha": 0.95},
+                    zorder=6, clip_on=False)
     fig.tight_layout(rect=(0, 0, 1, 0.92))
     return fig
 
@@ -889,6 +963,15 @@ st.sidebar.header("Instellingen")
 _cap_min, _cap_max, _cap_default, _cap_step = get_max_capaciteit_config()
 capaciteit_ton = st.sidebar.slider("Max capaciteit per dag (ton)", _cap_min, _cap_max, _cap_default, _cap_step)
 capaciteit_kg = capaciteit_ton * 1000
+STUKS_ACTIEF = get_stuks_planning_actief()
+capaciteit_stuks = None
+if STUKS_ACTIEF:
+    _st_min, _st_max, _st_default, _st_step = get_stuks_capaciteit_config()
+    capaciteit_stuks = st.sidebar.slider(
+        "Max stuks per dag", _st_min, _st_max, _st_default, _st_step,
+        help="Afhaalcapaciteit Wit in stuks per verzinkdag. Richtwaarde: "
+             "≈52 traverses × ≈61 stuks ≈ 3.200 stuks bij 3–4 bezette afhaalstellingen.",
+    )
 _advies_cfg = get_advies_config()
 # Vast: verzinkdatum = leverdatum - 2 werkdagen (leverdatum = verzinkdatum + 2).
 offset = _advies_cfg["levering_na_verzinken"]
@@ -923,6 +1006,7 @@ df, df_plan, dag, week, advies_datum = build_dashboard_data(
     capaciteit_kg,
     offset,
     kg_per_traverse_constructie,
+    capaciteit_stuks=capaciteit_stuks,
 )
 advies = bereken_eerstvolgende_leverdatum(
     df,
@@ -1185,6 +1269,20 @@ with tab1:
     st.pyplot(make_professional_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
     st.caption("De grafiek toont de geplande belasting per verzinkdatum, uitgesplitst naar bevestigde orders en reserveringen. De verzinkdatum is berekend als de leverdatum minus 2 werkdagen.")
 
+    if STUKS_ACTIEF and "Stuks" in dag.columns:
+        st.subheader("Stuks versus capaciteit op verzinkdatum")
+        st.pyplot(make_stuks_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
+        _st_tot = float(dag["Stuks"].sum())
+        _st_gesch = float(dag["Stuks_geschat"].sum())
+        _pct_gesch = (_st_gesch / _st_tot * 100) if _st_tot > 0 else 0.0
+        st.caption(
+            "Aantal te verzinken stuks per verzinkdatum. Bevestigde orders gebruiken het aantal uit "
+            "Orderregels.xlsx; reserveringen (en regels zonder orderregels) worden geschat met het "
+            "gewicht gedeeld door het gemiddelde kg/stuk van de klant, of de standaardwaarde. "
+            f"In deze horizon is {format_pct(_pct_gesch)} van de stuks geschat. "
+            "Onderaan staat het gemiddelde gewicht per stuk: hoe lager, hoe meer afhaalwerk per ton."
+        )
+
     st.subheader("Materiaaltype per verzinkdatum")
     st.pyplot(make_materiaaltype_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
     st.caption("Deze grafiek toont dezelfde totale dagbelasting, maar dan uitgesplitst naar materiaaltype op basis van het klantsegment uit debtor-export.xlsx.")
@@ -1205,6 +1303,14 @@ with tab1:
             return ["background-color: rgba(220, 38, 38, 0.12)"] * len(row)
         return [""] * len(row)
     dag_cols = ["Verzinkdatum", "Dagtype", "Aantal_orders_te_verzinken", "Gewicht_kg"] + dag_segment_cols + ["Capaciteit_kg", "Benutting_pct", "Traverses_berekend", "Status"]
+    if STUKS_ACTIEF and "Stuks" in dag_display.columns:
+        for c in ["Stuks", "Stuks_geschat", "Capaciteit_stuks"]:
+            dag_display[c] = dag_display[c].apply(format_int)
+        dag_display["Benutting_stuks_pct"] = dag_display["Benutting_stuks_pct"].apply(format_pct)
+        dag_display["Kg_per_stuk"] = dag_display["Kg_per_stuk"].apply(
+            lambda v: "" if pd.isna(v) else f"{v:.1f}".replace(".", ",")
+        )
+        dag_cols += ["Stuks", "Stuks_geschat", "Capaciteit_stuks", "Benutting_stuks_pct", "Kg_per_stuk", "Status_stuks"]
     st.dataframe(dag_display[dag_cols].style.apply(mark_holiday_row, axis=1), width="stretch", hide_index=True)
     st.subheader("Weekoverzicht")
     week_display = week.copy()
@@ -1212,7 +1318,13 @@ with tab1:
     week_display["Capaciteit_kg"] = week_display["Capaciteit_kg"].apply(format_int)
     week_display["Benutting_pct"] = week_display["Benutting_pct"].apply(format_pct)
     week_display["Traverses_berekend"] = week_display["Traverses_berekend"].astype(int)
-    st.dataframe(week_display[["Jaar","Week","Aantal_orders_te_verzinken","Gewicht_kg","Capaciteit_kg","Benutting_pct","Traverses_berekend","Status"]], width="stretch", hide_index=True)
+    week_cols = ["Jaar","Week","Aantal_orders_te_verzinken","Gewicht_kg","Capaciteit_kg","Benutting_pct","Traverses_berekend","Status"]
+    if STUKS_ACTIEF and "Stuks" in week_display.columns:
+        for c in ["Stuks", "Capaciteit_stuks"]:
+            week_display[c] = week_display[c].apply(format_int)
+        week_display["Benutting_stuks_pct"] = week_display["Benutting_stuks_pct"].apply(format_pct)
+        week_cols += ["Stuks", "Capaciteit_stuks", "Benutting_stuks_pct", "Status_stuks"]
+    st.dataframe(week_display[week_cols], width="stretch", hide_index=True)
     st.subheader("Feestdagen en fabriekssluiting")
     holiday_show = holiday_df.copy()
     holiday_show["Datum"] = pd.to_datetime(holiday_show["Datum"]).dt.strftime("%d-%m-%Y")
@@ -1652,7 +1764,7 @@ with tab_prod:
 
 with tab2:
     st.subheader("Gebruikte gegevens / controletabel")
-    relevant_cols = ["Bronbestand","Bron_week","Nummer","Ordernummer_base","Debiteurnummer","Klantnaam","Segment_debtor_export","Materiaaltype","Gewicht_effectief_kg","Status","Verzinkstatus","Meegeteld_in_planning","Reden_uitsluiting","Datum","Leverdatum","Verzinkdatum","Aanleveren depot","Gewicht","Gewicht_export_kg","Gewicht_order_kg","Regels_per_order","Gewicht_2g_verdeeld_kg","Gewicht_bron"]
+    relevant_cols = ["Bronbestand","Bron_week","Nummer","Ordernummer_base","Debiteurnummer","Klantnaam","Segment_debtor_export","Materiaaltype","Gewicht_effectief_kg","Status","Verzinkstatus","Meegeteld_in_planning","Reden_uitsluiting","Datum","Leverdatum","Verzinkdatum","Aanleveren depot","Gewicht","Gewicht_export_kg","Gewicht_order_kg","Regels_per_order","Gewicht_2g_verdeeld_kg","Gewicht_bron","Stuks","Stuks_bron","Kg_per_stuk_gebruikt"]
     relevant_cols = [c for c in relevant_cols if c in df.columns]
     controle_df = df[relevant_cols].copy() if toon_alle_regels else df_plan[relevant_cols].copy()
 

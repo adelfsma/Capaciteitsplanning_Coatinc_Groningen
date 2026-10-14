@@ -11,6 +11,7 @@ from shared import (
     OPTIONAL_FILES,
     OPTIONAL_FILE_LABELS,
     DEBTOR_EXPORT_FILE,
+    ORDERREGEL_FILE,
     load_metadata,
     publish_files,
     save_metadata,
@@ -18,6 +19,7 @@ from shared import (
     validate_feestdagen_xlsx,
     validate_required_files_in_folder,
     validate_debtor_export_xlsx,
+    validate_orderregels_xlsx,
     render_environment_banner,
     get_page_title,
     is_test_environment,
@@ -160,6 +162,8 @@ if publish:
                 (tmp_dir / fname).write_bytes(stage[fname])
                 if fname == DEBTOR_EXPORT_FILE:
                     validate_debtor_export_xlsx(tmp_dir / fname)
+                if fname == ORDERREGEL_FILE:
+                    validate_orderregels_xlsx(tmp_dir / fname)
 
         # All valid → upload newly uploaded files to cloud
         newly_uploaded = {
