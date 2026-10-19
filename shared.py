@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.23"
+APP_VERSION = "v2.5.24"
 
 
 def get_app_environment() -> str:
@@ -260,6 +260,7 @@ RESERVERING_WINDOW_NA   = 40   # dagen na vandaag
 # stuks_capaciteit_default = 3200                     # stukscapaciteit-slider (stuks/dag): startwaarde
 # stuks_capaciteit_step = 100                         # stukscapaciteit-slider: stapgrootte
 # kg_per_stuk_default = 34                            # schatting kg/stuk als klant te weinig historie heeft
+# poetsen_verzink_werkdagen = 0                       # >0 = poetsorders verzinken X werkdagen vóór leverdatum (CAL: 3); depot blijft 1
 
 _LOCATIE_DEFAULTS = {
     "naam": "Coatinc Groningen",
@@ -380,6 +381,14 @@ def get_kg_per_stuk_default() -> float:
     de klant te weinig historie heeft. Default 34 (gemiddelde CAL 2026)."""
     val = float(_get_locatie_number("kg_per_stuk_default", 34))
     return val if val > 0 else 34.0
+
+
+def get_poetsen_verzink_werkdagen() -> int:
+    """Aantal werkdagen tussen verzinken en leveren voor poetsorders.
+    0 (default) = geen aparte regel: poetsorders volgen de normale offset.
+    Zet in secrets: [locatie] poetsen_verzink_werkdagen = 3.
+    Depotorders (Aanleveren depot = 1) blijven altijd op 1 werkdag."""
+    return max(int(_get_locatie_number("poetsen_verzink_werkdagen", 0)), 0)
 
 
 def get_otif_uitsluiten_statussen() -> set:
@@ -1394,6 +1403,65 @@ def koppel_stuks(
     return df
 
 
+# ── Poetsorders herkennen (voor de verzinkdatum) ──────────────────────────────
+# Bevestigde deelorders (weekexports): PrijsCategorie bevat 'poetsen'
+#   ("Poetsen licht ( B )" / "Poetsen zwaar ( A )"). Alleen als PrijsCategorie
+#   leeg is, valt de herkenning terug op het nummer <ordernr>VC<n>-V.
+#   VC-deelorders mét PrijsCategorie zonder poetsen zijn coat zonder poetswerk
+#   en tellen dus NIET als poetsorder.
+# Reserveringen (OrderExport2G, geen PrijsCategorie): Gewicht poetsen > 0,
+#   Leverdatum C gevuld, of een orderregel met Subbonnummer V = ...VC<n>-V.
+# Coat-delen (-C) worden niet gemarkeerd; die vallen buiten de planning.
+
+_POETS_VC_PATTERN = r"VC\d+-V$"
+
+
+def markeer_poetsorders(df: pd.DataFrame, orderregels: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Voeg kolommen Poetsorder ('Ja'/'Nee') en Poetsorder_reden toe."""
+    out = df.copy()
+    idx = out.index
+    nummer = out["Nummer"].astype(str).str.strip().str.upper() if "Nummer" in out.columns \
+        else pd.Series("", index=idx)
+    is_coat_deel = nummer.str.endswith("-C")
+    is_res = out["Gewicht_bron"].eq("Reservering") if "Gewicht_bron" in out.columns \
+        else pd.Series(False, index=idx)
+
+    prijs = out["PrijsCategorie"] if "PrijsCategorie" in out.columns else pd.Series(np.nan, index=idx)
+    prijs_leeg = prijs.isna() | prijs.astype(str).str.strip().isin(["", "nan", "None"])
+    prijs_poets = ~prijs_leeg & prijs.astype(str).str.contains("poetsen", case=False, na=False)
+    nummer_vc = nummer.str.contains(_POETS_VC_PATTERN, regex=True, na=False)
+
+    def _kol(naam):
+        return out[naam] if naam in out.columns else pd.Series(np.nan, index=idx)
+
+    gew_poets = pd.to_numeric(_kol("Gewicht poetsen"), errors="coerce").fillna(0) > 0
+    lev_c = pd.to_datetime(_kol("Leverdatum C"), errors="coerce").notna()
+    if orderregels is not None and not orderregels.empty and "Subbonnummer V" in orderregels.columns:
+        vc_orders = set(
+            coerce_numeric(orderregels.loc[
+                orderregels["Subbonnummer V"].astype(str).str.strip().str.upper()
+                .str.contains(_POETS_VC_PATTERN, regex=True, na=False), "OrderID"
+            ]).dropna().astype(int)
+        )
+    else:
+        vc_orders = set()
+    ordernr = coerce_numeric(_kol("Ordernummer_base"))
+    regel_vc = ordernr.isin(vc_orders)
+
+    reden = pd.Series("", index=idx, dtype=object)
+    bev = ~is_res & ~is_coat_deel
+    reden[bev & prijs_poets] = "PrijsCategorie bevat poetsen"
+    reden[bev & prijs_leeg & nummer_vc & (reden == "")] = "Nummer VCx-V (PrijsCategorie leeg)"
+    res = is_res & ~is_coat_deel
+    reden[res & gew_poets] = "Gewicht poetsen > 0"
+    reden[res & lev_c & (reden == "")] = "Leverdatum C gevuld"
+    reden[res & regel_vc & (reden == "")] = "Orderregel VCx-V"
+
+    out["Poetsorder"] = np.where(reden != "", "Ja", "Nee")
+    out["Poetsorder_reden"] = reden
+    return out
+
+
 @st.cache_data(ttl=60, show_spinner="Data laden uit de cloud…")
 def load_published_data():
     """
@@ -1635,13 +1703,17 @@ def load_published_data():
             "Aantal_regels_ingelezen": len(debtor_lookup),
         })
 
-    # ── 7b. Aantal te verzinken stuks (alleen als stuksplanning actief) ────
+    # ── 7b. Orderregels (stuksplanning en poetsherkenning reserveringen) ──
+    orderregels = None
+    orderregel_fp = tmp / ORDERREGEL_FILE
+    if orderregel_fp.exists() and (get_stuks_planning_actief() or get_poetsen_verzink_werkdagen() > 0):
+        orderregels = pd.read_excel(orderregel_fp, usecols=lambda c: c in ORDERREGEL_KOLOMMEN)
+
+    # ── 7c. Poetsorders markeren (bepaalt verzinkdatum in build_dashboard_data)
+    merged = markeer_poetsorders(merged, orderregels)
+
+    # ── 7d. Aantal te verzinken stuks (alleen als stuksplanning actief) ────
     if get_stuks_planning_actief():
-        orderregel_fp = tmp / ORDERREGEL_FILE
-        orderregels = (
-            pd.read_excel(orderregel_fp, usecols=lambda c: c in ORDERREGEL_KOLOMMEN)
-            if orderregel_fp.exists() else None
-        )
         merged = koppel_stuks(merged, orderregels, get_kg_per_stuk_default())
         if orderregels is not None:
             export_file_summary.append({
@@ -1796,6 +1868,7 @@ def build_dashboard_data(
     offset: int,
     kg_per_traverse: int,
     capaciteit_stuks: int | None = None,
+    poetsen_offset: int | None = None,
 ):
     """capaciteit_stuks: max. aantal te verzinken stuks per dag. Alleen gebruikt
     als de data een kolom 'Stuks' heeft (stuksplanning actief); dan krijgen dag-
@@ -1811,10 +1884,16 @@ def build_dashboard_data(
     # Zwarte voorraad: subcategorie o.b.v. Status, ongeacht planningshorizon.
     df["Zwarte_voorraad_categorie"] = df["Status"].map(ZWARTE_VOORRAAD_MAP)
 
-    # Verzinkdatum: depot Amsterdam (Aanleveren depot=1) → -1 werkdag, overig → sidebar offset
+    # Verzinkdatum: depot (Aanleveren depot=1) → -1 werkdag; poetsorder →
+    # -poetsen_offset werkdagen (per vestiging, 0 = uit); overig → sidebar offset.
+    if poetsen_offset is None:
+        poetsen_offset = get_poetsen_verzink_werkdagen()
+
     def _row_offset(row):
         if pd.notna(row.get("Aanleveren depot")) and int(row["Aanleveren depot"]) == 1:
             return 1
+        if poetsen_offset and row.get("Poetsorder") == "Ja":
+            return int(poetsen_offset)
         return offset
 
     df["Verzinkdatum"] = df.apply(

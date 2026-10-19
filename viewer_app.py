@@ -46,6 +46,7 @@ from shared import (
     get_max_capaciteit_config,
     get_kg_traverse_defaults,
     get_stuks_planning_actief,
+    get_poetsen_verzink_werkdagen,
     get_stuks_capaciteit_config,
     get_otif_uitsluiten_statussen,
     get_otif_uitsluiten_klanten,
@@ -1267,7 +1268,15 @@ with tab1:
 
     st.subheader("Capaciteit versus dagbelasting op verzinkdatum")
     st.pyplot(make_professional_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
-    st.caption("De grafiek toont de geplande belasting per verzinkdatum, uitgesplitst naar bevestigde orders en reserveringen. De verzinkdatum is berekend als de leverdatum minus 2 werkdagen.")
+    _poets_wd = get_poetsen_verzink_werkdagen()
+    _poets_txt = (
+        f" Poetsorders: leverdatum minus {_poets_wd} werkdagen." if _poets_wd else ""
+    )
+    st.caption(
+        "De grafiek toont de geplande belasting per verzinkdatum, uitgesplitst naar bevestigde orders "
+        "en reserveringen. De verzinkdatum is berekend als de leverdatum minus 2 werkdagen "
+        f"(depotorders: minus 1).{_poets_txt}"
+    )
 
     if STUKS_ACTIEF and "Stuks" in dag.columns:
         st.subheader("Stuks versus capaciteit op verzinkdatum")
@@ -1764,7 +1773,7 @@ with tab_prod:
 
 with tab2:
     st.subheader("Gebruikte gegevens / controletabel")
-    relevant_cols = ["Bronbestand","Bron_week","Nummer","Ordernummer_base","Debiteurnummer","Klantnaam","Segment_debtor_export","Materiaaltype","Gewicht_effectief_kg","Status","Verzinkstatus","Meegeteld_in_planning","Reden_uitsluiting","Datum","Leverdatum","Verzinkdatum","Aanleveren depot","Gewicht","Gewicht_export_kg","Gewicht_order_kg","Regels_per_order","Gewicht_2g_verdeeld_kg","Gewicht_bron","Stuks","Stuks_bron","Kg_per_stuk_gebruikt"]
+    relevant_cols = ["Bronbestand","Bron_week","Nummer","Ordernummer_base","Debiteurnummer","Klantnaam","Segment_debtor_export","Materiaaltype","Gewicht_effectief_kg","Status","Verzinkstatus","Meegeteld_in_planning","Reden_uitsluiting","Datum","Leverdatum","Verzinkdatum","Aanleveren depot","Gewicht","Gewicht_export_kg","Gewicht_order_kg","Regels_per_order","Gewicht_2g_verdeeld_kg","Gewicht_bron","Poetsorder","Poetsorder_reden","Stuks","Stuks_bron","Kg_per_stuk_gebruikt"]
     relevant_cols = [c for c in relevant_cols if c in df.columns]
     controle_df = df[relevant_cols].copy() if toon_alle_regels else df_plan[relevant_cols].copy()
 
