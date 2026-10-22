@@ -31,20 +31,22 @@ from shared import (  # noqa: E402
 
 
 def test_map_otif_status_matches_spec():
-    """De mapping uit Status_OTIF.xlsx moet 1-op-1 herkend worden."""
+    """De mapping moet 1-op-1 herkend worden. Bijgewerkt naar de huidige
+    OTIF_STATUS_MAP: PC Afgehaald, PC Opgehangen, Nabewerking nog uitvoeren en
+    meetrapport tellen als op tijd (Ja)."""
     verwacht = {
         "uitgeleverd":               "Ja",
         "Afgehaald":                 "Ja",
-        "PC Afgehaald":              "Nvt",
+        "PC Afgehaald":              "Ja",
         "Productie gereed":          "Nee",
         "Geblokkeerd":               "Nee",
         "Opgehangen":                "Nee",
         "coat gereed":               "Ja",
         "UB":                        "Nee",
-        "Nabewerking nog uitvoeren": "Nee",
+        "Nabewerking nog uitvoeren": "Ja",
         "UB V Gereed":               "Ja",
-        "meetrapport":               "Nee",
-        "PC Opgehangen":             "Nee",
+        "meetrapport":               "Ja",
+        "PC Opgehangen":             "Ja",
     }
     for status, expected in verwacht.items():
         got = map_otif_status(status)
@@ -107,7 +109,7 @@ def _mock_merged(peildag: date) -> pd.DataFrame:
         {"Bron_week": "0", "Nummer": "A-007", "Leverdatum": peil_ts,
          "Originele_leverdatum": peil_ts, "Status": "Opgehangen",
          "Gewicht_effectief_kg": 400.0, "Klantnaam": "Klant G"},
-        # Nvt
+        # Ja (PC Afgehaald telt sinds de statuscorrectie als op tijd)
         {"Bron_week": "0", "Nummer": "A-008", "Leverdatum": peil_ts,
          "Originele_leverdatum": peil_ts, "Status": "PC Afgehaald",
          "Gewicht_effectief_kg": 600.0, "Klantnaam": "Klant H"},
@@ -134,12 +136,12 @@ def test_compute_otif_basic():
 
     # Verwacht: 9 orders op de peildag (reservering + andere datum vallen buiten).
     assert r["totaal"] == 9, f"totaal = {r['totaal']}"
-    # Ja: 4 (uitgeleverd, Afgehaald, coat gereed, UB V Gereed)
-    assert r["gereed"] == 4, f"gereed = {r['gereed']}"
+    # Ja: 5 (uitgeleverd, Afgehaald, coat gereed, UB V Gereed, PC Afgehaald)
+    assert r["gereed"] == 5, f"gereed = {r['gereed']}"
     # Nee: 3 (Productie gereed, Geblokkeerd, Opgehangen)
     assert r["niet_gereed"] == 3, f"niet_gereed = {r['niet_gereed']}"
-    # Nvt: 1 (PC Afgehaald)
-    assert r["nvt"] == 1, f"nvt = {r['nvt']}"
+    # Nvt: 0 (geen status meer die op Nvt staat)
+    assert r["nvt"] == 0, f"nvt = {r['nvt']}"
     # Onbekend: 1 (Gereserveerd*)
     assert r["onbekend"] == 1, f"onbekend = {r['onbekend']}"
 
@@ -166,7 +168,7 @@ def test_compute_otif_originele_datum():
                      date_column_label="Originele datum")
     # In deze fake set zijn Leverdatum en Originele_leverdatum gelijk, dus zelfde uitkomst.
     assert r["totaal"] == 9
-    assert r["gereed"] == 4
+    assert r["gereed"] == 5
     assert r["niet_gereed"] == 3
     assert r["date_column"] == "Originele_leverdatum"
     print("✅ test_compute_otif_originele_datum")

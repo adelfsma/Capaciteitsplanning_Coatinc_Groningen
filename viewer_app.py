@@ -1,6 +1,8 @@
 
 import base64
+import io
 import os
+import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import matplotlib.pyplot as plt
@@ -70,6 +72,50 @@ st.set_page_config(
     ),
     initial_sidebar_state="collapsed" if BALIE_MODUS else "auto",
 )
+
+# ── Snelheid (v2.5.25) ────────────────────────────────────────────────────────
+# Tijdmeting per stap, zichtbaar in het tabblad Debug.
+_RUN_START = time.perf_counter()
+_TIMINGS: list[tuple[str, float]] = []
+
+
+def _meet(stap: str, t0: float) -> None:
+    _TIMINGS.append((stap, time.perf_counter() - t0))
+
+
+def _maak_tabs(labels: list[str], key: str):
+    """Tabbladen waarbij alleen het geopende tabblad wordt uitgevoerd.
+
+    Met on_change="rerun" (Streamlit >= 1.5x) rekent Streamlit alleen het
+    geselecteerde tabblad; wisselen van tabblad geeft een (snelle) rerun.
+    Oudere Streamlit-versies: gewone tabbladen, alles wordt uitgevoerd."""
+    try:
+        return st.tabs(labels, key=key, on_change="rerun")
+    except TypeError:
+        return st.tabs(labels)
+
+
+def _tab_open(tab) -> bool:
+    """True als dit tabblad geopend is (of als lazy tabs niet beschikbaar zijn)."""
+    return getattr(tab, "open", None) is not False
+
+
+@st.cache_data(show_spinner=False, max_entries=30)
+def _grafiek_png(soort: str, day_df: pd.DataFrame) -> bytes:
+    """Teken een dashboardgrafiek één keer per unieke dagdata en bewaar de PNG.
+    Matplotlib is traag; zo wordt een grafiek alleen opnieuw getekend als de
+    onderliggende data (bv. capaciteit of startdatum) verandert."""
+    fn = {
+        "kg": make_professional_matplotlib_chart,
+        "stuks": make_stuks_matplotlib_chart,
+        "materiaal": make_materiaaltype_matplotlib_chart,
+    }[soort]
+    fig = fn(day_df)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return buf.getvalue()
+
 
 def bereken_aantal_balken(
     day_df: pd.DataFrame,
@@ -994,12 +1040,15 @@ default_start = previous_workday(date.today())
 startdatum = st.sidebar.date_input("Startdatum rapport", value=default_start)
 toon_alle_regels = st.sidebar.checkbox("Toon alle regels in controletab", value=True)
 
+_t0 = time.perf_counter()
 try:
     df_raw, export_file_summary, order_file, holiday_df = load_published_data()
 except Exception as e:
     st.error(f"Kan gepubliceerde data niet laden: {e}")
     st.stop()
+_meet("Data laden (cloud of cache)", _t0)
 
+_t0 = time.perf_counter()
 df, df_plan, dag, week, advies_datum = build_dashboard_data(
     df_raw,
     holiday_df,
@@ -1009,6 +1058,8 @@ df, df_plan, dag, week, advies_datum = build_dashboard_data(
     kg_per_traverse_constructie,
     capaciteit_stuks=capaciteit_stuks,
 )
+_meet("Planning berekenen (build_dashboard_data)", _t0)
+_t0 = time.perf_counter()
 advies = bereken_eerstvolgende_leverdatum(
     df,
     holiday_df,
@@ -1020,6 +1071,7 @@ advies = bereken_eerstvolgende_leverdatum(
     horizon_werkdagen=_advies_cfg["horizon_werkdagen"],
     terugschuif_werkdagen=_advies_cfg["terugschuif_werkdagen"],
 )
+_meet("Eerstvolgende leverdatum", _t0)
 dag = bereken_aantal_balken(
     dag,
     kg_per_traverse_constructie,
@@ -1081,6 +1133,7 @@ otif_date_column, otif_date_label = otif_datum_keuzes[otif_datum_keuze_label]
 # overslaat. holiday_df bevat de datums uit de metadata-feestdagenkalender.
 otif_holiday_dates = set(holiday_df["Datum"].tolist()) if not holiday_df.empty else set()
 
+_t0 = time.perf_counter()
 otif_result = compute_otif(
     df,
     peildatum=otif_peildatum,
@@ -1091,6 +1144,7 @@ otif_result = compute_otif(
     uitsluiten_statussen=get_otif_uitsluiten_statussen(),
     uitsluiten_klanten=get_otif_uitsluiten_klanten(),
 )
+_meet("OTIF berekenen", _t0)
 
 # Balie-modus (?view=balie): alleen het klantscherm, met de zijbalk-instellingen.
 _balie_args = (capaciteit_kg, advies_drempel_pct, startdatum, kg_per_traverse_constructie)
@@ -1099,36 +1153,38 @@ if BALIE_MODUS:
     render_balie(*_balie_args)
     st.stop()
 
-tab1, tab_prod, tab2, tab3, tab4, tab_balie = st.tabs(
-    ["Voorraad & OTIF", "Productie dashboard", "Gebruikte gegevens", "OTIF", "Debug", "Balie"]
+tab1, tab_prod, tab2, tab3, tab4, tab_balie = _maak_tabs(
+    ["Voorraad & OTIF", "Productie dashboard", "Gebruikte gegevens", "OTIF", "Debug", "Balie"],
+    key="hoofdtab",
 )
 
 with tab1:
-    st.subheader("Voorraadoverzicht en OTIF")
+    if _tab_open(tab1):
+        st.subheader("Voorraadoverzicht en OTIF")
 
-    # Zwarte voorraad: momentopname o.b.v. Status, los van de planningshorizon.
-    # "Totale zwarte voorraad" = som van de twee subcategorieën hieronder.
-    kg_productie_gereed = float(
-        df.loc[df["Zwarte_voorraad_categorie"] == "Productie gereed", "Gewicht_effectief_kg"].sum()
-    )
-    kg_voorbewerking_geblokkeerd = float(
-        df.loc[df["Zwarte_voorraad_categorie"] == "Binnengemeld/Voorbewerking/Geblokkeerd", "Gewicht_effectief_kg"].sum()
-    )
-    kg_totale_zwarte_voorraad = kg_productie_gereed + kg_voorbewerking_geblokkeerd
+        # Zwarte voorraad: momentopname o.b.v. Status, los van de planningshorizon.
+        # "Totale zwarte voorraad" = som van de twee subcategorieën hieronder.
+        kg_productie_gereed = float(
+            df.loc[df["Zwarte_voorraad_categorie"] == "Productie gereed", "Gewicht_effectief_kg"].sum()
+        )
+        kg_voorbewerking_geblokkeerd = float(
+            df.loc[df["Zwarte_voorraad_categorie"] == "Binnengemeld/Voorbewerking/Geblokkeerd", "Gewicht_effectief_kg"].sum()
+        )
+        kg_totale_zwarte_voorraad = kg_productie_gereed + kg_voorbewerking_geblokkeerd
 
-    # Witte voorraad: statussen die al afgehandeld/verzinkt zijn, maar nog als
-    # voorraadstroom zichtbaar moeten zijn. Matching bewust case-insensitive.
-    witte_statussen_norm = {str(s).strip().casefold() for s in WITTE_VOORRAAD_STATUSSEN}
-    status_norm = df["Status"].astype(str).str.strip().str.casefold() if "Status" in df.columns else pd.Series([], dtype=str)
-    kg_witte_voorraad = float(
-        df.loc[status_norm.isin(witte_statussen_norm), "Gewicht_effectief_kg"].sum()
-    ) if "Status" in df.columns else 0.0
+        # Witte voorraad: statussen die al afgehandeld/verzinkt zijn, maar nog als
+        # voorraadstroom zichtbaar moeten zijn. Matching bewust case-insensitive.
+        witte_statussen_norm = {str(s).strip().casefold() for s in WITTE_VOORRAAD_STATUSSEN}
+        status_norm = df["Status"].astype(str).str.strip().str.casefold() if "Status" in df.columns else pd.Series([], dtype=str)
+        kg_witte_voorraad = float(
+            df.loc[status_norm.isin(witte_statussen_norm), "Gewicht_effectief_kg"].sum()
+        ) if "Status" in df.columns else 0.0
 
-    # Gedeelde opmaak voor de drie kaarten. De inhoud van elke kaart heeft
-    # dezelfde structuur (label + waarde + detailregel), waardoor Streamlit
-    # ze automatisch op gelijke hoogte rendert.
-    st.markdown(
-        """
+        # Gedeelde opmaak voor de drie kaarten. De inhoud van elke kaart heeft
+        # dezelfde structuur (label + waarde + detailregel), waardoor Streamlit
+        # ze automatisch op gelijke hoogte rendert.
+        st.markdown(
+            """
         <style>
         .cgr-stock-card {
             border: 1px solid #d0d7de;
@@ -1169,14 +1225,14 @@ with tab1:
         }
         </style>
         """,
-        unsafe_allow_html=True,
-    )
+            unsafe_allow_html=True,
+        )
 
-    col_zwart, col_wit, col_otif = st.columns(3)
+        col_zwart, col_wit, col_otif = st.columns(3)
 
-    with col_zwart:
-        st.markdown(
-            f"""
+        with col_zwart:
+            st.markdown(
+                f"""
             <div class="cgr-stock-card cgr-stock-card-accent-black">
                 <div class="cgr-stock-label">Zwarte voorraad (kg)</div>
                 <div class="cgr-stock-value">{format_int(kg_totale_zwarte_voorraad)}</div>
@@ -1186,12 +1242,12 @@ with tab1:
                 </div>
             </div>
             """,
-            unsafe_allow_html=True,
-        )
+                unsafe_allow_html=True,
+            )
 
-    with col_wit:
-        st.markdown(
-            f"""
+        with col_wit:
+            st.markdown(
+                f"""
             <div class="cgr-stock-card cgr-stock-card-accent-white">
                 <div class="cgr-stock-label">Witte voorraad (kg)</div>
                 <div class="cgr-stock-value">{format_int(kg_witte_voorraad)}</div>
@@ -1200,37 +1256,37 @@ with tab1:
                 </div>
             </div>
             """,
-            unsafe_allow_html=True,
-        )
-
-    with col_otif:
-        # OTIF: identieke kaartstructuur als voorraadkaarten (label + waarde
-        # + detailregel), aangevuld met een subtiele 3-zone bar als
-        # miniatuur-snelheidsmeter. De volledige gauge staat in het
-        # OTIF-tabblad voor drill-down.
-        peildatum_str = pd.Timestamp(otif_result["peildatum"]).strftime("%d-%m-%Y")
-        otif_num_color = _otif_zone_color(otif_result["otif_pct"])
-        otif_pct_html = (
-            "geen data" if otif_result["otif_pct"] is None
-            else f"{otif_result['otif_pct']:.1f}%"
-        )
-        if otif_result["totaal"] > 0:
-            samenvatting = (
-                f"{otif_result['gereed']} op tijd · "
-                f"{otif_result['niet_gereed']} te laat · "
-                f"{otif_result['nvt']} nvt"
+                unsafe_allow_html=True,
             )
-            if otif_result["onbekend"] > 0:
-                samenvatting += f" · {otif_result['onbekend']} onbekend"
-            samenvatting += f" (totaal {otif_result['totaal']})"
+
+        with col_otif:
+            # OTIF: identieke kaartstructuur als voorraadkaarten (label + waarde
+            # + detailregel), aangevuld met een subtiele 3-zone bar als
+            # miniatuur-snelheidsmeter. De volledige gauge staat in het
+            # OTIF-tabblad voor drill-down.
+            peildatum_str = pd.Timestamp(otif_result["peildatum"]).strftime("%d-%m-%Y")
+            otif_num_color = _otif_zone_color(otif_result["otif_pct"])
+            otif_pct_html = (
+                "geen data" if otif_result["otif_pct"] is None
+                else f"{otif_result['otif_pct']:.1f}%"
+            )
+            if otif_result["totaal"] > 0:
+                samenvatting = (
+                    f"{otif_result['gereed']} op tijd · "
+                    f"{otif_result['niet_gereed']} te laat · "
+                    f"{otif_result['nvt']} nvt"
+                )
+                if otif_result["onbekend"] > 0:
+                    samenvatting += f" · {otif_result['onbekend']} onbekend"
+                samenvatting += f" (totaal {otif_result['totaal']})"
             
-        else:
-            samenvatting = "Geen orders met deze peildatum in de dataset."
+            else:
+                samenvatting = "Geen orders met deze peildatum in de dataset."
 
-        zonebar_svg = make_otif_zone_bar_svg(otif_result["otif_pct"])
+            zonebar_svg = make_otif_zone_bar_svg(otif_result["otif_pct"])
 
-        st.markdown(
-            f"""
+            st.markdown(
+                f"""
             <div class="cgr-stock-card cgr-stock-card-accent-otif">
                 <div class="cgr-stock-label">OTIF · {otif_result['date_column_label']} = {peildatum_str}</div>
                 <div class="cgr-stock-value" style="color: {otif_num_color};">{otif_pct_html}</div>
@@ -1238,718 +1294,721 @@ with tab1:
                 <div class="cgr-stock-detail">{samenvatting}</div>
             </div>
             """,
-            unsafe_allow_html=True,
-        )
+                unsafe_allow_html=True,
+            )
 
-    st.subheader("Eerstvolgende leverdatum van niet gereserveerde orders")
-    if advies["gevonden"]:
-        _fmt_d = lambda d: f"{['ma','di','wo','do','vr','za','zo'][d.weekday()]} {d.strftime('%d-%m-%Y')}"
-        _pct = lambda v: f"{v:.1f}%".replace(".", ",")
-        _opgeschoven = (
-            f" · {advies['aantal_opgeschoven']} werkdag(en) opgeschoven t.o.v. de standaard "
-            f"verzinkdatum {_fmt_d(advies['vroegste_verzinkdatum'])}"
-            if advies["aantal_opgeschoven"] > 0 else " · standaard levertijd haalbaar"
-        )
-        st.markdown(
-            f'''<div style="padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid #d0d7de; background-color: #f6f8fa; margin-bottom: 0.75rem;">
+        st.subheader("Eerstvolgende leverdatum van niet gereserveerde orders")
+        if advies["gevonden"]:
+            _fmt_d = lambda d: f"{['ma','di','wo','do','vr','za','zo'][d.weekday()]} {d.strftime('%d-%m-%Y')}"
+            _pct = lambda v: f"{v:.1f}%".replace(".", ",")
+            _opgeschoven = (
+                f" · {advies['aantal_opgeschoven']} werkdag(en) opgeschoven t.o.v. de standaard "
+                f"verzinkdatum {_fmt_d(advies['vroegste_verzinkdatum'])}"
+                if advies["aantal_opgeschoven"] > 0 else " · standaard levertijd haalbaar"
+            )
+            st.markdown(
+                f'''<div style="padding: 1rem 1.25rem; border-radius: 12px; border: 1px solid #d0d7de; background-color: #f6f8fa; margin-bottom: 0.75rem;">
                 <div style="font-size: 2.2rem; font-weight: 700;">{_fmt_d(advies["leverdatum"])} <span style="font-size: 1.1rem; font-weight: 500; color: #475569;">({advies["levertijd_werkdagen"]} werkdagen)</span></div>
                 <div style="font-size: 1rem; color: #475569; margin-top: 0.2rem;">Verzinkdatum: <strong>{_fmt_d(advies["verzinkdatum"])}</strong>{_opgeschoven}</div>
                 <div style="font-size: 0.82rem; color: #64748b; margin-top: 0.35rem;">
                     Benutting verzinkdag na terugschuiven van pieken: {_pct(advies["benutting_d"])} (eigen orders: {_pct(advies["benutting_d_origineel"])}) · drempel {_pct(advies["drempel_pct"])}
                 </div>
             </div>''',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.warning(
-            f"Geen verzinkdag gevonden binnen {advies['horizon_werkdagen']} werkdagen waarop de "
-            f"benutting (na terugschuiven van pieken) onder {advies['drempel_pct']:.0f}% blijft."
-        )
+                unsafe_allow_html=True,
+            )
+        else:
+            st.warning(
+                f"Geen verzinkdag gevonden binnen {advies['horizon_werkdagen']} werkdagen waarop de "
+                f"benutting (na terugschuiven van pieken) onder {advies['drempel_pct']:.0f}% blijft."
+            )
 
-    st.subheader("Capaciteit versus dagbelasting op verzinkdatum")
-    st.pyplot(make_professional_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
-    _poets_wd = get_poetsen_verzink_werkdagen()
-    _poets_txt = (
-        f" Poetsorders: leverdatum minus {_poets_wd} werkdagen." if _poets_wd else ""
-    )
-    st.caption(
-        "De grafiek toont de geplande belasting per verzinkdatum, uitgesplitst naar bevestigde orders "
-        "en reserveringen. De verzinkdatum is berekend als de leverdatum minus 2 werkdagen "
-        f"(depotorders: minus 1).{_poets_txt}"
-    )
-
-    if STUKS_ACTIEF and "Stuks" in dag.columns:
-        st.subheader("Stuks versus capaciteit op verzinkdatum")
-        st.pyplot(make_stuks_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
-        _st_tot = float(dag["Stuks"].sum())
-        _st_gesch = float(dag["Stuks_geschat"].sum())
-        _pct_gesch = (_st_gesch / _st_tot * 100) if _st_tot > 0 else 0.0
+        st.subheader("Capaciteit versus dagbelasting op verzinkdatum")
+        st.image(_grafiek_png("kg", dag), width="stretch")
+        _poets_wd = get_poetsen_verzink_werkdagen()
+        _poets_txt = (
+            f" Poetsorders: leverdatum minus {_poets_wd} werkdagen." if _poets_wd else ""
+        )
         st.caption(
-            "Aantal te verzinken stuks per verzinkdatum. Bevestigde orders gebruiken het aantal uit "
-            "Orderregels.xlsx; reserveringen (en regels zonder orderregels) worden geschat met het "
-            "gewicht gedeeld door het gemiddelde kg/stuk van de klant, of de standaardwaarde. "
-            f"In deze horizon is {format_pct(_pct_gesch)} van de stuks geschat. "
-            "Onderaan staat het gemiddelde gewicht per stuk: hoe lager, hoe meer afhaalwerk per ton."
+            "De grafiek toont de geplande belasting per verzinkdatum, uitgesplitst naar bevestigde orders "
+            "en reserveringen. De verzinkdatum is berekend als de leverdatum minus 2 werkdagen "
+            f"(depotorders: minus 1).{_poets_txt}"
         )
 
-    st.subheader("Materiaaltype per verzinkdatum")
-    st.pyplot(make_materiaaltype_matplotlib_chart(dag), clear_figure=True, use_container_width=True)
-    st.caption("Deze grafiek toont dezelfde totale dagbelasting, maar dan uitgesplitst naar materiaaltype op basis van het klantsegment uit debtor-export.xlsx.")
+        if STUKS_ACTIEF and "Stuks" in dag.columns:
+            st.subheader("Stuks versus capaciteit op verzinkdatum")
+            st.image(_grafiek_png("stuks", dag), width="stretch")
+            _st_tot = float(dag["Stuks"].sum())
+            _st_gesch = float(dag["Stuks_geschat"].sum())
+            _pct_gesch = (_st_gesch / _st_tot * 100) if _st_tot > 0 else 0.0
+            st.caption(
+                "Aantal te verzinken stuks per verzinkdatum. Bevestigde orders gebruiken het aantal uit "
+                "Orderregels.xlsx; reserveringen (en regels zonder orderregels) worden geschat met het "
+                "gewicht gedeeld door het gemiddelde kg/stuk van de klant, of de standaardwaarde. "
+                f"In deze horizon is {format_pct(_pct_gesch)} van de stuks geschat. "
+                "Onderaan staat het gemiddelde gewicht per stuk: hoe lager, hoe meer afhaalwerk per ton."
+            )
 
-    st.subheader("Dagoverzicht")
-    dag_display = dag.copy()
-    dag_display["Verzinkdatum"] = dag_display["Verzinkdatum"].dt.date
-    dag_segment_cols = [col for col in MATERIAALTYPE_DAG_COLS.values() if col in dag_display.columns]
-    dag_display["Gewicht_kg"] = dag_display["Gewicht_kg"].apply(format_int)
-    for c in dag_segment_cols:
-        dag_display[c] = dag_display[c].apply(format_int)
-    dag_display["Capaciteit_kg"] = dag_display["Capaciteit_kg"].apply(format_int)
-    dag_display["Benutting_pct"] = dag_display["Benutting_pct"].apply(format_pct)
-    dag_display["Traverses_berekend"] = dag_display["Traverses_berekend"].astype(int)
-    dag_display["Dagtype"] = dag_display["Dagtype"].astype(str)
-    def mark_holiday_row(row):
-        if row["Dagtype"] == "Feestdag / sluiting":
-            return ["background-color: rgba(220, 38, 38, 0.12)"] * len(row)
-        return [""] * len(row)
-    dag_cols = ["Verzinkdatum", "Dagtype", "Aantal_orders_te_verzinken", "Gewicht_kg"] + dag_segment_cols + ["Capaciteit_kg", "Benutting_pct", "Traverses_berekend", "Status"]
-    if STUKS_ACTIEF and "Stuks" in dag_display.columns:
-        for c in ["Stuks", "Stuks_geschat", "Capaciteit_stuks"]:
+        st.subheader("Materiaaltype per verzinkdatum")
+        st.image(_grafiek_png("materiaal", dag), width="stretch")
+        st.caption("Deze grafiek toont dezelfde totale dagbelasting, maar dan uitgesplitst naar materiaaltype op basis van het klantsegment uit debtor-export.xlsx.")
+
+        st.subheader("Dagoverzicht")
+        dag_display = dag.copy()
+        dag_display["Verzinkdatum"] = dag_display["Verzinkdatum"].dt.date
+        dag_segment_cols = [col for col in MATERIAALTYPE_DAG_COLS.values() if col in dag_display.columns]
+        dag_display["Gewicht_kg"] = dag_display["Gewicht_kg"].apply(format_int)
+        for c in dag_segment_cols:
             dag_display[c] = dag_display[c].apply(format_int)
-        dag_display["Benutting_stuks_pct"] = dag_display["Benutting_stuks_pct"].apply(format_pct)
-        dag_display["Kg_per_stuk"] = dag_display["Kg_per_stuk"].apply(
-            lambda v: "" if pd.isna(v) else f"{v:.1f}".replace(".", ",")
-        )
-        dag_cols += ["Stuks", "Stuks_geschat", "Capaciteit_stuks", "Benutting_stuks_pct", "Kg_per_stuk", "Status_stuks"]
-    st.dataframe(dag_display[dag_cols].style.apply(mark_holiday_row, axis=1), width="stretch", hide_index=True)
-    st.subheader("Weekoverzicht")
-    week_display = week.copy()
-    week_display["Gewicht_kg"] = week_display["Gewicht_kg"].apply(format_int)
-    week_display["Capaciteit_kg"] = week_display["Capaciteit_kg"].apply(format_int)
-    week_display["Benutting_pct"] = week_display["Benutting_pct"].apply(format_pct)
-    week_display["Traverses_berekend"] = week_display["Traverses_berekend"].astype(int)
-    week_cols = ["Jaar","Week","Aantal_orders_te_verzinken","Gewicht_kg","Capaciteit_kg","Benutting_pct","Traverses_berekend","Status"]
-    if STUKS_ACTIEF and "Stuks" in week_display.columns:
-        for c in ["Stuks", "Capaciteit_stuks"]:
-            week_display[c] = week_display[c].apply(format_int)
-        week_display["Benutting_stuks_pct"] = week_display["Benutting_stuks_pct"].apply(format_pct)
-        week_cols += ["Stuks", "Capaciteit_stuks", "Benutting_stuks_pct", "Status_stuks"]
-    st.dataframe(week_display[week_cols], width="stretch", hide_index=True)
-    st.subheader("Feestdagen en fabriekssluiting")
-    holiday_show = holiday_df.copy()
-    holiday_show["Datum"] = pd.to_datetime(holiday_show["Datum"]).dt.strftime("%d-%m-%Y")
-    st.dataframe(holiday_show, width="stretch", hide_index=True)
+        dag_display["Capaciteit_kg"] = dag_display["Capaciteit_kg"].apply(format_int)
+        dag_display["Benutting_pct"] = dag_display["Benutting_pct"].apply(format_pct)
+        dag_display["Traverses_berekend"] = dag_display["Traverses_berekend"].astype(int)
+        dag_display["Dagtype"] = dag_display["Dagtype"].astype(str)
+        def mark_holiday_row(row):
+            if row["Dagtype"] == "Feestdag / sluiting":
+                return ["background-color: rgba(220, 38, 38, 0.12)"] * len(row)
+            return [""] * len(row)
+        dag_cols = ["Verzinkdatum", "Dagtype", "Aantal_orders_te_verzinken", "Gewicht_kg"] + dag_segment_cols + ["Capaciteit_kg", "Benutting_pct", "Traverses_berekend", "Status"]
+        if STUKS_ACTIEF and "Stuks" in dag_display.columns:
+            for c in ["Stuks", "Stuks_geschat", "Capaciteit_stuks"]:
+                dag_display[c] = dag_display[c].apply(format_int)
+            dag_display["Benutting_stuks_pct"] = dag_display["Benutting_stuks_pct"].apply(format_pct)
+            dag_display["Kg_per_stuk"] = dag_display["Kg_per_stuk"].apply(
+                lambda v: "" if pd.isna(v) else f"{v:.1f}".replace(".", ",")
+            )
+            dag_cols += ["Stuks", "Stuks_geschat", "Capaciteit_stuks", "Benutting_stuks_pct", "Kg_per_stuk", "Status_stuks"]
+        st.dataframe(dag_display[dag_cols].style.apply(mark_holiday_row, axis=1), width="stretch", hide_index=True)
+        st.subheader("Weekoverzicht")
+        week_display = week.copy()
+        week_display["Gewicht_kg"] = week_display["Gewicht_kg"].apply(format_int)
+        week_display["Capaciteit_kg"] = week_display["Capaciteit_kg"].apply(format_int)
+        week_display["Benutting_pct"] = week_display["Benutting_pct"].apply(format_pct)
+        week_display["Traverses_berekend"] = week_display["Traverses_berekend"].astype(int)
+        week_cols = ["Jaar","Week","Aantal_orders_te_verzinken","Gewicht_kg","Capaciteit_kg","Benutting_pct","Traverses_berekend","Status"]
+        if STUKS_ACTIEF and "Stuks" in week_display.columns:
+            for c in ["Stuks", "Capaciteit_stuks"]:
+                week_display[c] = week_display[c].apply(format_int)
+            week_display["Benutting_stuks_pct"] = week_display["Benutting_stuks_pct"].apply(format_pct)
+            week_cols += ["Stuks", "Capaciteit_stuks", "Benutting_stuks_pct", "Status_stuks"]
+        st.dataframe(week_display[week_cols], width="stretch", hide_index=True)
+        st.subheader("Feestdagen en fabriekssluiting")
+        holiday_show = holiday_df.copy()
+        holiday_show["Datum"] = pd.to_datetime(holiday_show["Datum"]).dt.strftime("%d-%m-%Y")
+        st.dataframe(holiday_show, width="stretch", hide_index=True)
 
 # ── Tab: Productie dashboard ───────────────────────────────────────────────────
 with tab_prod:
-    st.subheader("Productie dashboard")
-    st.caption(
-        "KPI-overzicht per week (bron: MIS-export + capaciteitsplanning + "
-        "daily snapshots voor historische plan-waarden)."
-    )
-
-    # MIS-data, handmatige invoer en snapshot-historie laden
-    try:
-        mis_df = load_mis_data()
-    except Exception as e:
-        st.error(f"MIS-bestand kon niet worden ingeladen: {e}")
-        mis_df = pd.DataFrame()
-
-    manual_dict = load_dashboard_manual()
-    snapshots = load_daily_snapshots()
-
-    if mis_df.empty:
-        st.warning(
-            "Er is nog geen MIS-bestand (`mis.xlsx`) beschikbaar in de cloud. "
-            "Vraag de beheerder om deze te uploaden via de beheeromgeving."
-        )
-
-    # Week-selector: huidige ISO-week als default
-    _today = pd.Timestamp(date.today()).normalize()
-    _iso_now = _today.isocalendar()
-    c_year, c_week, _c_spacer = st.columns([1, 1, 4])
-    with c_year:
-        gekozen_jaar = st.number_input(
-            "Jaar", min_value=2024, max_value=2099, value=int(_iso_now.year), step=1
-        )
-    with c_week:
-        gekozen_week = st.number_input(
-            "Weeknummer", min_value=1, max_value=53, value=int(_iso_now.week), step=1
-        )
-
-    _feest_set = set(pd.to_datetime(holiday_df["Datum"]).tolist()) if not holiday_df.empty else set()
-
-    # Bouw beide weken (huidige/gekozen + vorige)
-    _monday_current = pd.Timestamp.fromisocalendar(int(gekozen_jaar), int(gekozen_week), 1)
-    _monday_prev = _monday_current - pd.Timedelta(days=7)
-    _iso_prev = _monday_prev.isocalendar()
-
-    week_curr = build_productie_dashboard_week(
-        mis_df, dag, manual_dict, int(gekozen_jaar), int(gekozen_week), _feest_set,
-        snapshots=snapshots,
-    )
-    week_prev = build_productie_dashboard_week(
-        mis_df, dag, manual_dict, int(_iso_prev.year), int(_iso_prev.week), _feest_set,
-        snapshots=snapshots,
-    )
-
-    # ── Handmatige invoer (wachtwoordbeveiligd) ────────────────────────────────
-    with st.expander("🔒 Handmatige velden invoeren (beheer)"):
-        pw = st.text_input("Beheerwachtwoord", type="password", key="prod_dashboard_pw")
-        if pw == "":
-            st.caption("Vul het beheerwachtwoord in om handmatige velden op te slaan.")
-        elif pw != get_beheer_wachtwoord():
-            st.error("Onjuist wachtwoord.")
-        else:
-            st.success("Ingelogd als beheerder.")
-            invoer_datum = st.date_input(
-                "Datum",
-                value=date.today(),
-                help="Kies de dag waarop de handmatige velden betrekking hebben.",
-            )
-            bestaand = manual_dict.get(pd.Timestamp(invoer_datum).strftime("%Y-%m-%d"), {})
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                inp_klachten = st.number_input(
-                    "Aantal klachten",
-                    min_value=0, step=1,
-                    value=int(bestaand.get("klachten", 0)),
-                )
-            with c2:
-                inp_storing = st.number_input(
-                    "Storingstijd (min)",
-                    min_value=0, step=1,
-                    value=int(bestaand.get("storingstijd_min", 0)),
-                )
-            with c3:
-                inp_veilig = st.number_input(
-                    "Veiligheidsincidenten",
-                    min_value=0, step=1,
-                    value=int(bestaand.get("veiligheidsincidenten", 0)),
-                )
-            if st.button("Opslaan", type="primary"):
-                try:
-                    save_dashboard_manual_entry(invoer_datum, inp_klachten, inp_storing, inp_veilig)
-                    st.success(f"✅ Opgeslagen voor {invoer_datum.strftime('%d-%m-%Y')}.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Opslaan mislukt: {e}")
-
-            st.markdown("---")
-            st.markdown("**Snapshot backfill** (voor gemiste dagen)")
-            st.caption(
-                "Slaat een snapshot op met de HUIDIGE plan- en OTIF-berekening onder "
-                "de gekozen datum. Alleen gebruiken voor dagen waarop de app niet is "
-                "geopend — de waarden zijn per definitie minder accuraat dan een "
-                "on-the-day snapshot en worden gemarkeerd als 'backfilled'."
-            )
-            bc1, bc2 = st.columns([2, 1])
-            with bc1:
-                bf_datum = st.date_input(
-                    "Backfill-datum",
-                    value=otif_peildatum,
-                    key="prod_dashboard_backfill_datum",
-                )
-            with bc2:
-                bf_overwrite = st.checkbox("Overschrijf bestaand", value=False,
-                                            key="prod_dashboard_backfill_overwrite")
-            if st.button("Backfill snapshot"):
-                try:
-                    _bf_plan_kg = None
-                    if not dag.empty and "Verzinkdatum" in dag.columns:
-                        _bf_match = dag[pd.to_datetime(dag["Verzinkdatum"]).dt.normalize()
-                                        == pd.Timestamp(bf_datum).normalize()]
-                        if not _bf_match.empty:
-                            _bf_plan_kg = float(_bf_match.iloc[0].get("Gewicht_kg", 0) or 0)
-                    _bf_saved = save_daily_snapshot(
-                        bf_datum, _bf_plan_kg, otif_result,
-                        overwrite=bf_overwrite, backfilled=True,
-                    )
-                    if _bf_saved:
-                        st.success(f"✅ Snapshot opgeslagen voor {bf_datum.strftime('%d-%m-%Y')}.")
-                        st.rerun()
-                    else:
-                        st.info(
-                            f"Er bestaat al een snapshot voor {bf_datum.strftime('%d-%m-%Y')}. "
-                            "Vink 'Overschrijf bestaand' aan om die te vervangen."
-                        )
-                except Exception as e:
-                    st.error(f"Backfill mislukt: {e}")
-
-    # ── Weektabellen onder elkaar (compact zodat ze passen zonder scrollen) ────
-    # Kortere kolomlabels + kleinere breedtes zodat de tabel binnen de container past.
-    _PROD_COL_CONFIG = {
-        "Dag":                    st.column_config.TextColumn("Dag",       width="small"),
-        "Datum":                  st.column_config.TextColumn("Datum",     width="small"),
-        "TONNAGE PLAN":           st.column_config.TextColumn("Plan (kg)", width="small"),
-        "TONNAGE WERKELIJK":      st.column_config.TextColumn("Werkelijk (kg)", width="small"),
-        "MANUREN / TON":          st.column_config.TextColumn("manuur/ton", width="small"),
-        "AFKEUR IN KG":           st.column_config.TextColumn("Afkeur (kg)", width="small"),
-        "AANTAL TRAVERSEN":       st.column_config.TextColumn("Trav.",     width="small"),
-        "GEM GEWICHT PER TR":     st.column_config.TextColumn("kg/trav.",  width="small"),
-        "AANTAL KLACHTEN":        st.column_config.TextColumn("Klachten",  width="small"),
-        "Storingstijd in min":    st.column_config.TextColumn("Storing (min)", width="small"),
-        "VEILIGHEIDSINCIDENTEN":  st.column_config.TextColumn("Veiligheid", width="small"),
-    }
-
-    def _fmt_week_df(week_df: pd.DataFrame) -> pd.DataFrame:
-        """Format datums als dd-mm en getallen met NL duizendtal-punt."""
-        out = week_df.copy()
-        out["Datum"] = pd.to_datetime(out["Datum"]).dt.strftime("%d-%m")
-        int_cols = ["TONNAGE PLAN", "TONNAGE WERKELIJK", "AFKEUR IN KG",
-                    "AANTAL TRAVERSEN", "GEM GEWICHT PER TR", "AANTAL KLACHTEN",
-                    "Storingstijd in min", "VEILIGHEIDSINCIDENTEN"]
-        for c in int_cols:
-            if c in out.columns:
-                out[c] = out[c].apply(lambda v: format_int(v) if pd.notna(v) else "")
-        if "MANUREN / TON" in out.columns:
-            out["MANUREN / TON"] = out["MANUREN / TON"].apply(
-                lambda v: f"{v:.2f}".replace(".", ",") if pd.notna(v) else ""
-            )
-        return out
-
-    st.markdown(f"##### Week {int(gekozen_week)} — huidige selectie")
-    st.dataframe(
-        _fmt_week_df(week_curr),
-        width="stretch", hide_index=True,
-        column_config=_PROD_COL_CONFIG,
-    )
-
-    st.markdown(f"##### Week {int(_iso_prev.week)} — vorige week")
-    st.dataframe(
-        _fmt_week_df(week_prev),
-        width="stretch", hide_index=True,
-        column_config=_PROD_COL_CONFIG,
-    )
-
-    # ── Chart helpers (verfijnde stijl) ────────────────────────────────────────
-    # Kleuren afgestemd op de bestaande grafieken in de app (blauw voor werkelijk,
-    # subtiel rood voor de norm-lijn).
-    _KLEUR_WERKELIJK = "#2E75B6"
-    _KLEUR_NORM      = "#C00000"
-    _KLEUR_GRID      = "#E5E5E5"
-    _KLEUR_TEXT      = "#333333"
-
-    def _style_axis(ax):
-        """Uniforme, opgeruimde stijl voor alle KPI-grafieken."""
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.spines["left"].set_color(_KLEUR_GRID)
-        ax.spines["bottom"].set_color(_KLEUR_GRID)
-        ax.tick_params(colors=_KLEUR_TEXT, labelsize=9)
-        ax.yaxis.grid(True, color=_KLEUR_GRID, linestyle="-", linewidth=0.6, alpha=0.7)
-        ax.set_axisbelow(True)
-        ax.title.set_color(_KLEUR_TEXT)
-        ax.title.set_fontsize(11)
-        ax.title.set_fontweight("semibold")
-        ax.title.set_loc = "left"
-        for spine in ax.spines.values():
-            spine.set_linewidth(0.8)
-
-    def _pad_ylim(ax, values, norm_values=None, extra=0.35, floor=0):
-        """Zet y-limits op basis van max-waarde met extra kopruimte.
-        35% padding voorkomt dat de legenda over de hoge bars valt."""
-        candidates = [v for v in values if v is not None and pd.notna(v) and v > 0]
-        if norm_values is not None:
-            candidates += [v for v in norm_values if v is not None and pd.notna(v) and v > 0]
-        if not candidates:
-            return
-        top = max(candidates) * (1 + extra)
-        ax.set_ylim(bottom=floor, top=top)
-
-    def _draw_week_chart(ax, plot_df, kpi_col, norm_getter, y_label, titel):
-        """Werkelijk als bars, norm als horizontale streepjeslijn, waarde-labels bovenop."""
-        werkelijk = plot_df[kpi_col].tolist()
-        if not any(pd.notna(v) and v > 0 for v in werkelijk):
-            ax.text(0.5, 0.5, "Geen data in deze week", ha="center", va="center",
-                    transform=ax.transAxes, color="#999", fontsize=10)
-            ax.set_axis_off()
-            ax.set_title(titel, loc="left", pad=10, color=_KLEUR_TEXT,
-                         fontsize=11, fontweight="semibold")
-            return
-        norm_waarden = [norm_getter(d) for d in pd.to_datetime(plot_df["Datum"])]
-        x = np.arange(len(plot_df))
-        bars = [v if pd.notna(v) else 0 for v in werkelijk]
-
-        ax.bar(x, bars, width=0.60, color=_KLEUR_WERKELIJK, alpha=0.90,
-               edgecolor="none", label="Werkelijk", zorder=2)
-        ax.plot(x, norm_waarden, color=_KLEUR_NORM, linestyle="--", linewidth=1.6,
-                marker="", label="Norm", zorder=3)
-
-        # Waarde-labels bovenaan iedere bar
-        for xi, v in zip(x, werkelijk):
-            if pd.notna(v) and v > 0:
-                label = f"{v:.1f}".replace(".", ",") if v < 100 else format_int(v)
-                ax.text(xi, v, label, ha="center", va="bottom", fontsize=8,
-                        color=_KLEUR_TEXT, zorder=4)
-
-        ax.set_xticks(x)
-        ax.set_xticklabels(
-            [f"{r['Dag']}\n{pd.to_datetime(r['Datum']).strftime('%d-%m')}"
-             for _, r in plot_df.iterrows()],
-            fontsize=9, color=_KLEUR_TEXT,
-        )
-        ax.set_ylabel(y_label, fontsize=9, color=_KLEUR_TEXT)
-        ax.legend(loc="upper right", fontsize=8, frameon=False)
-        _style_axis(ax)
-        _pad_ylim(ax, werkelijk, norm_waarden)
-        ax.set_title(titel, loc="left", pad=10, color=_KLEUR_TEXT,
-                     fontsize=11, fontweight="semibold")
-
-    def _draw_ytd_chart(ax, ytd_df, value_col, norm_getter, y_label, titel):
-        """YTD per ISO-week: werkelijk als bars, norm als lijn."""
-        if ytd_df.empty:
-            ax.text(0.5, 0.5, "Geen YTD-data beschikbaar", ha="center", va="center",
-                    transform=ax.transAxes, color="#999", fontsize=10)
-            ax.set_axis_off()
-            ax.set_title(titel, loc="left", pad=10, color=_KLEUR_TEXT,
-                         fontsize=11, fontweight="semibold")
-            return
-        weken = ytd_df["Weeknr"].tolist()
-        werkelijk = ytd_df[value_col].tolist()
-        norm_waarden = [norm_getter(d) for d in ytd_df["Week_startdatum"]]
-        x = np.arange(len(weken))
-
-        ax.bar(x, [v if pd.notna(v) else 0 for v in werkelijk],
-               width=0.75, color=_KLEUR_WERKELIJK, alpha=0.85,
-               edgecolor="none", label="Werkelijk", zorder=2)
-        ax.plot(x, norm_waarden, color=_KLEUR_NORM, linestyle="--", linewidth=1.6,
-                marker="", label="Norm", zorder=3)
-
-        # Tick spacing: max ~10 labels om overlap te voorkomen
-        step = 1 if len(weken) <= 10 else max(1, len(weken) // 10)
-        tick_idx = list(range(0, len(weken), step))
-        # Zorg dat de laatste week zichtbaar is — vervang de laatste als hij te
-        # dicht op de nieuwe laatste zou komen te staan, anders toevoegen.
-        last_i = len(weken) - 1
-        if tick_idx and tick_idx[-1] != last_i:
-            if last_i - tick_idx[-1] < step:
-                tick_idx[-1] = last_i
-            else:
-                tick_idx.append(last_i)
-        ax.set_xticks(tick_idx)
-        ax.set_xticklabels([f"w{weken[i]}" for i in tick_idx],
-                           fontsize=9, color=_KLEUR_TEXT)
-        ax.set_ylabel(y_label, fontsize=9, color=_KLEUR_TEXT)
-        ax.legend(loc="upper right", fontsize=8, frameon=False)
-        _style_axis(ax)
-        _pad_ylim(ax, werkelijk, norm_waarden)
-        ax.set_title(titel, loc="left", pad=10, color=_KLEUR_TEXT,
-                     fontsize=11, fontweight="semibold")
-
-    # ── Week-grafieken (huidige selectie, ma t/m vr) ───────────────────────────
-    st.markdown(f"### Verloop deze week (week {int(gekozen_week)}, ma t/m vr)")
-    _plot_week = week_curr.head(5).copy()
-
-    fig_w, axes_w = plt.subplots(1, 3, figsize=(15, 3.6), dpi=110)
-    fig_w.patch.set_facecolor("white")
-    _draw_week_chart(axes_w[0], _plot_week, "MANUREN / TON",
-                     get_norm_manuren_per_ton, "manuren / ton",
-                     "Manuren per ton")
-    _draw_week_chart(axes_w[1], _plot_week, "AANTAL TRAVERSEN",
-                     get_norm_traversen_per_dag, "traversen",
-                     "Aantal traversen")
-    _draw_week_chart(axes_w[2], _plot_week, "GEM GEWICHT PER TR",
-                     get_norm_gem_gewicht_per_traverse, "kg / traverse",
-                     "Gemiddeld gewicht per traverse")
-    fig_w.tight_layout()
-    st.pyplot(fig_w)
-    plt.close(fig_w)
-
-    # ── Week-grafieken (vorige week, ma t/m vr) ────────────────────────────────
-    st.markdown(f"### Verloop vorige week (week {int(_iso_prev.week)}, ma t/m vr)")
-    _plot_week_prev = week_prev.head(5).copy()
-
-    fig_wp, axes_wp = plt.subplots(1, 3, figsize=(15, 3.6), dpi=110)
-    fig_wp.patch.set_facecolor("white")
-    _draw_week_chart(axes_wp[0], _plot_week_prev, "MANUREN / TON",
-                     get_norm_manuren_per_ton, "manuren / ton",
-                     "Manuren per ton")
-    _draw_week_chart(axes_wp[1], _plot_week_prev, "AANTAL TRAVERSEN",
-                     get_norm_traversen_per_dag, "traversen",
-                     "Aantal traversen")
-    _draw_week_chart(axes_wp[2], _plot_week_prev, "GEM GEWICHT PER TR",
-                     get_norm_gem_gewicht_per_traverse, "kg / traverse",
-                     "Gemiddeld gewicht per traverse")
-    fig_wp.tight_layout()
-    st.pyplot(fig_wp)
-    plt.close(fig_wp)
-
-    # ── YTD-grafieken (per ISO-week van gekozen jaar) ──────────────────────────
-    st.markdown(f"### Year to date ({int(gekozen_jaar)}, per week)")
-    ytd_df = build_productie_dashboard_ytd(mis_df, int(gekozen_jaar))
-    if ytd_df.empty:
-        st.info("Nog geen YTD-data voor dit jaar beschikbaar.")
-    else:
-        fig_y, axes_y = plt.subplots(1, 3, figsize=(15, 3.6), dpi=110)
-        fig_y.patch.set_facecolor("white")
-        _draw_ytd_chart(axes_y[0], ytd_df, "Manuren_per_ton_gewogen",
-                        get_norm_manuren_per_ton, "manuren / ton",
-                        "Manuren per ton (gem. per dag)")
-        _draw_ytd_chart(axes_y[1], ytd_df, "Traversen_totaal",
-                        lambda d: get_norm_traversen_per_dag(d) * 5,
-                        "traversen / week",
-                        "Aantal traversen per week")
-        _draw_ytd_chart(axes_y[2], ytd_df, "Gem_gewicht_per_traverse",
-                        get_norm_gem_gewicht_per_traverse, "kg / traverse",
-                        "Gemiddeld gewicht per traverse")
-        fig_y.tight_layout()
-        st.pyplot(fig_y)
-        plt.close(fig_y)
+    if _tab_open(tab_prod):
+        st.subheader("Productie dashboard")
         st.caption(
-            "YTD-aggregatie: manuren/ton is het rekenkundig gemiddelde van de dagwaarden per week. "
-            "Gem gewicht/traverse is som(KG)/som(traversen) per week. "
-            "Norm voor traversen is dag-norm × 5 werkdagen."
+            "KPI-overzicht per week (bron: MIS-export + capaciteitsplanning + "
+            "daily snapshots voor historische plan-waarden)."
         )
 
-    # ── OTIF-trend (uit snapshot-historie) ─────────────────────────────────────
-    st.markdown("### OTIF-trend")
-    trend_col_l, trend_col_r = st.columns([1, 5])
-    with trend_col_l:
-        _trend_periode = st.selectbox(
-            "Periode",
-            options=[30, 60, 90, 180, 365],
-            index=2,  # default 90 dagen
-            format_func=lambda n: f"laatste {n} dagen",
-            key="prod_dashboard_trend_periode",
-        )
-    trend_df = build_otif_trend_df(snapshots, days_back=int(_trend_periode))
+        # MIS-data, handmatige invoer en snapshot-historie laden
+        try:
+            mis_df = load_mis_data()
+        except Exception as e:
+            st.error(f"MIS-bestand kon niet worden ingeladen: {e}")
+            mis_df = pd.DataFrame()
 
-    if trend_df.empty:
-        st.info(
-            "Nog geen OTIF-historie beschikbaar. Snapshots worden automatisch "
-            "opgebouwd zodra de app dagelijks wordt geopend. Bestaande historie "
-            "kan handmatig aangevuld worden via 'Backfill snapshot' in de "
-            "beheer-expander hierboven."
-        )
-    else:
-        fig_t, ax_t = plt.subplots(figsize=(15, 3.4), dpi=110)
-        fig_t.patch.set_facecolor("white")
-        x = np.arange(len(trend_df))
-        pcts = trend_df["OTIF_pct"].tolist()
-        # Aparte kleur voor backfilled punten
-        colors = ["#F59E0B" if bf else _KLEUR_WERKELIJK
-                  for bf in trend_df["Backfilled"].tolist()]
-        ax_t.plot(x, pcts, color=_KLEUR_WERKELIJK, linewidth=1.6,
-                  marker="", label="OTIF %", zorder=2)
-        ax_t.scatter(x, pcts, c=colors, s=22, zorder=3, edgecolor="white", linewidth=0.6)
-        # Norm-lijnen (OTIF thresholds)
-        ax_t.axhline(y=OTIF_GAUGE_GREEN_THRESHOLD, color="#2E9E4B", linestyle=":",
-                     linewidth=1.2, alpha=0.7, label=f"Groen ≥ {int(OTIF_GAUGE_GREEN_THRESHOLD)}%")
-        ax_t.axhline(y=OTIF_GAUGE_ORANGE_THRESHOLD, color="#C77A00", linestyle=":",
-                     linewidth=1.2, alpha=0.7, label=f"Oranje ≥ {int(OTIF_GAUGE_ORANGE_THRESHOLD)}%")
+        manual_dict = load_dashboard_manual()
+        snapshots = load_daily_snapshots()
 
-        # X-as ticks: max ~10 datum-labels
-        n = len(trend_df)
-        step = 1 if n <= 10 else max(1, n // 10)
-        tick_idx = list(range(0, n, step))
-        if tick_idx and tick_idx[-1] != n - 1:
-            if (n - 1) - tick_idx[-1] < step:
-                tick_idx[-1] = n - 1
-            else:
-                tick_idx.append(n - 1)
-        ax_t.set_xticks(tick_idx)
-        ax_t.set_xticklabels(
-            [trend_df.iloc[i]["Datum"].strftime("%d-%m") for i in tick_idx],
-            fontsize=9, color=_KLEUR_TEXT,
-        )
-        ax_t.set_ylabel("OTIF %", fontsize=9, color=_KLEUR_TEXT)
-        ax_t.set_ylim(0, 105)
-        ax_t.legend(loc="lower left", fontsize=8, frameon=False, ncol=3)
-        _style_axis(ax_t)
-        ax_t.set_title(f"OTIF over de laatste {int(_trend_periode)} dagen",
-                       loc="left", pad=10, color=_KLEUR_TEXT,
-                       fontsize=11, fontweight="semibold")
-        fig_t.tight_layout()
-        st.pyplot(fig_t)
-        plt.close(fig_t)
-
-        n_backfilled = int(trend_df["Backfilled"].sum())
-        if n_backfilled:
-            st.caption(
-                f"Oranje punten zijn backfilled snapshots ({n_backfilled} van {len(trend_df)}) "
-                "— die zijn achteraf gemaakt en minder accuraat dan on-the-day snapshots."
+        if mis_df.empty:
+            st.warning(
+                "Er is nog geen MIS-bestand (`mis.xlsx`) beschikbaar in de cloud. "
+                "Vraag de beheerder om deze te uploaden via de beheeromgeving."
             )
+
+        # Week-selector: huidige ISO-week als default
+        _today = pd.Timestamp(date.today()).normalize()
+        _iso_now = _today.isocalendar()
+        c_year, c_week, _c_spacer = st.columns([1, 1, 4])
+        with c_year:
+            gekozen_jaar = st.number_input(
+                "Jaar", min_value=2024, max_value=2099, value=int(_iso_now.year), step=1
+            )
+        with c_week:
+            gekozen_week = st.number_input(
+                "Weeknummer", min_value=1, max_value=53, value=int(_iso_now.week), step=1
+            )
+
+        _feest_set = set(pd.to_datetime(holiday_df["Datum"]).tolist()) if not holiday_df.empty else set()
+
+        # Bouw beide weken (huidige/gekozen + vorige)
+        _monday_current = pd.Timestamp.fromisocalendar(int(gekozen_jaar), int(gekozen_week), 1)
+        _monday_prev = _monday_current - pd.Timedelta(days=7)
+        _iso_prev = _monday_prev.isocalendar()
+
+        week_curr = build_productie_dashboard_week(
+            mis_df, dag, manual_dict, int(gekozen_jaar), int(gekozen_week), _feest_set,
+            snapshots=snapshots,
+        )
+        week_prev = build_productie_dashboard_week(
+            mis_df, dag, manual_dict, int(_iso_prev.year), int(_iso_prev.week), _feest_set,
+            snapshots=snapshots,
+        )
+
+        # ── Handmatige invoer (wachtwoordbeveiligd) ────────────────────────────────
+        with st.expander("🔒 Handmatige velden invoeren (beheer)"):
+            pw = st.text_input("Beheerwachtwoord", type="password", key="prod_dashboard_pw")
+            if pw == "":
+                st.caption("Vul het beheerwachtwoord in om handmatige velden op te slaan.")
+            elif pw != get_beheer_wachtwoord():
+                st.error("Onjuist wachtwoord.")
+            else:
+                st.success("Ingelogd als beheerder.")
+                invoer_datum = st.date_input(
+                    "Datum",
+                    value=date.today(),
+                    help="Kies de dag waarop de handmatige velden betrekking hebben.",
+                )
+                bestaand = manual_dict.get(pd.Timestamp(invoer_datum).strftime("%Y-%m-%d"), {})
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    inp_klachten = st.number_input(
+                        "Aantal klachten",
+                        min_value=0, step=1,
+                        value=int(bestaand.get("klachten", 0)),
+                    )
+                with c2:
+                    inp_storing = st.number_input(
+                        "Storingstijd (min)",
+                        min_value=0, step=1,
+                        value=int(bestaand.get("storingstijd_min", 0)),
+                    )
+                with c3:
+                    inp_veilig = st.number_input(
+                        "Veiligheidsincidenten",
+                        min_value=0, step=1,
+                        value=int(bestaand.get("veiligheidsincidenten", 0)),
+                    )
+                if st.button("Opslaan", type="primary"):
+                    try:
+                        save_dashboard_manual_entry(invoer_datum, inp_klachten, inp_storing, inp_veilig)
+                        st.success(f"✅ Opgeslagen voor {invoer_datum.strftime('%d-%m-%Y')}.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Opslaan mislukt: {e}")
+
+                st.markdown("---")
+                st.markdown("**Snapshot backfill** (voor gemiste dagen)")
+                st.caption(
+                    "Slaat een snapshot op met de HUIDIGE plan- en OTIF-berekening onder "
+                    "de gekozen datum. Alleen gebruiken voor dagen waarop de app niet is "
+                    "geopend — de waarden zijn per definitie minder accuraat dan een "
+                    "on-the-day snapshot en worden gemarkeerd als 'backfilled'."
+                )
+                bc1, bc2 = st.columns([2, 1])
+                with bc1:
+                    bf_datum = st.date_input(
+                        "Backfill-datum",
+                        value=otif_peildatum,
+                        key="prod_dashboard_backfill_datum",
+                    )
+                with bc2:
+                    bf_overwrite = st.checkbox("Overschrijf bestaand", value=False,
+                                                key="prod_dashboard_backfill_overwrite")
+                if st.button("Backfill snapshot"):
+                    try:
+                        _bf_plan_kg = None
+                        if not dag.empty and "Verzinkdatum" in dag.columns:
+                            _bf_match = dag[pd.to_datetime(dag["Verzinkdatum"]).dt.normalize()
+                                            == pd.Timestamp(bf_datum).normalize()]
+                            if not _bf_match.empty:
+                                _bf_plan_kg = float(_bf_match.iloc[0].get("Gewicht_kg", 0) or 0)
+                        _bf_saved = save_daily_snapshot(
+                            bf_datum, _bf_plan_kg, otif_result,
+                            overwrite=bf_overwrite, backfilled=True,
+                        )
+                        if _bf_saved:
+                            st.success(f"✅ Snapshot opgeslagen voor {bf_datum.strftime('%d-%m-%Y')}.")
+                            st.rerun()
+                        else:
+                            st.info(
+                                f"Er bestaat al een snapshot voor {bf_datum.strftime('%d-%m-%Y')}. "
+                                "Vink 'Overschrijf bestaand' aan om die te vervangen."
+                            )
+                    except Exception as e:
+                        st.error(f"Backfill mislukt: {e}")
+
+        # ── Weektabellen onder elkaar (compact zodat ze passen zonder scrollen) ────
+        # Kortere kolomlabels + kleinere breedtes zodat de tabel binnen de container past.
+        _PROD_COL_CONFIG = {
+            "Dag":                    st.column_config.TextColumn("Dag",       width="small"),
+            "Datum":                  st.column_config.TextColumn("Datum",     width="small"),
+            "TONNAGE PLAN":           st.column_config.TextColumn("Plan (kg)", width="small"),
+            "TONNAGE WERKELIJK":      st.column_config.TextColumn("Werkelijk (kg)", width="small"),
+            "MANUREN / TON":          st.column_config.TextColumn("manuur/ton", width="small"),
+            "AFKEUR IN KG":           st.column_config.TextColumn("Afkeur (kg)", width="small"),
+            "AANTAL TRAVERSEN":       st.column_config.TextColumn("Trav.",     width="small"),
+            "GEM GEWICHT PER TR":     st.column_config.TextColumn("kg/trav.",  width="small"),
+            "AANTAL KLACHTEN":        st.column_config.TextColumn("Klachten",  width="small"),
+            "Storingstijd in min":    st.column_config.TextColumn("Storing (min)", width="small"),
+            "VEILIGHEIDSINCIDENTEN":  st.column_config.TextColumn("Veiligheid", width="small"),
+        }
+
+        def _fmt_week_df(week_df: pd.DataFrame) -> pd.DataFrame:
+            """Format datums als dd-mm en getallen met NL duizendtal-punt."""
+            out = week_df.copy()
+            out["Datum"] = pd.to_datetime(out["Datum"]).dt.strftime("%d-%m")
+            int_cols = ["TONNAGE PLAN", "TONNAGE WERKELIJK", "AFKEUR IN KG",
+                        "AANTAL TRAVERSEN", "GEM GEWICHT PER TR", "AANTAL KLACHTEN",
+                        "Storingstijd in min", "VEILIGHEIDSINCIDENTEN"]
+            for c in int_cols:
+                if c in out.columns:
+                    out[c] = out[c].apply(lambda v: format_int(v) if pd.notna(v) else "")
+            if "MANUREN / TON" in out.columns:
+                out["MANUREN / TON"] = out["MANUREN / TON"].apply(
+                    lambda v: f"{v:.2f}".replace(".", ",") if pd.notna(v) else ""
+                )
+            return out
+
+        st.markdown(f"##### Week {int(gekozen_week)} — huidige selectie")
+        st.dataframe(
+            _fmt_week_df(week_curr),
+            width="stretch", hide_index=True,
+            column_config=_PROD_COL_CONFIG,
+        )
+
+        st.markdown(f"##### Week {int(_iso_prev.week)} — vorige week")
+        st.dataframe(
+            _fmt_week_df(week_prev),
+            width="stretch", hide_index=True,
+            column_config=_PROD_COL_CONFIG,
+        )
+
+        # ── Chart helpers (verfijnde stijl) ────────────────────────────────────────
+        # Kleuren afgestemd op de bestaande grafieken in de app (blauw voor werkelijk,
+        # subtiel rood voor de norm-lijn).
+        _KLEUR_WERKELIJK = "#2E75B6"
+        _KLEUR_NORM      = "#C00000"
+        _KLEUR_GRID      = "#E5E5E5"
+        _KLEUR_TEXT      = "#333333"
+
+        def _style_axis(ax):
+            """Uniforme, opgeruimde stijl voor alle KPI-grafieken."""
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.spines["left"].set_color(_KLEUR_GRID)
+            ax.spines["bottom"].set_color(_KLEUR_GRID)
+            ax.tick_params(colors=_KLEUR_TEXT, labelsize=9)
+            ax.yaxis.grid(True, color=_KLEUR_GRID, linestyle="-", linewidth=0.6, alpha=0.7)
+            ax.set_axisbelow(True)
+            ax.title.set_color(_KLEUR_TEXT)
+            ax.title.set_fontsize(11)
+            ax.title.set_fontweight("semibold")
+            ax.title.set_loc = "left"
+            for spine in ax.spines.values():
+                spine.set_linewidth(0.8)
+
+        def _pad_ylim(ax, values, norm_values=None, extra=0.35, floor=0):
+            """Zet y-limits op basis van max-waarde met extra kopruimte.
+        35% padding voorkomt dat de legenda over de hoge bars valt."""
+            candidates = [v for v in values if v is not None and pd.notna(v) and v > 0]
+            if norm_values is not None:
+                candidates += [v for v in norm_values if v is not None and pd.notna(v) and v > 0]
+            if not candidates:
+                return
+            top = max(candidates) * (1 + extra)
+            ax.set_ylim(bottom=floor, top=top)
+
+        def _draw_week_chart(ax, plot_df, kpi_col, norm_getter, y_label, titel):
+            """Werkelijk als bars, norm als horizontale streepjeslijn, waarde-labels bovenop."""
+            werkelijk = plot_df[kpi_col].tolist()
+            if not any(pd.notna(v) and v > 0 for v in werkelijk):
+                ax.text(0.5, 0.5, "Geen data in deze week", ha="center", va="center",
+                        transform=ax.transAxes, color="#999", fontsize=10)
+                ax.set_axis_off()
+                ax.set_title(titel, loc="left", pad=10, color=_KLEUR_TEXT,
+                             fontsize=11, fontweight="semibold")
+                return
+            norm_waarden = [norm_getter(d) for d in pd.to_datetime(plot_df["Datum"])]
+            x = np.arange(len(plot_df))
+            bars = [v if pd.notna(v) else 0 for v in werkelijk]
+
+            ax.bar(x, bars, width=0.60, color=_KLEUR_WERKELIJK, alpha=0.90,
+                   edgecolor="none", label="Werkelijk", zorder=2)
+            ax.plot(x, norm_waarden, color=_KLEUR_NORM, linestyle="--", linewidth=1.6,
+                    marker="", label="Norm", zorder=3)
+
+            # Waarde-labels bovenaan iedere bar
+            for xi, v in zip(x, werkelijk):
+                if pd.notna(v) and v > 0:
+                    label = f"{v:.1f}".replace(".", ",") if v < 100 else format_int(v)
+                    ax.text(xi, v, label, ha="center", va="bottom", fontsize=8,
+                            color=_KLEUR_TEXT, zorder=4)
+
+            ax.set_xticks(x)
+            ax.set_xticklabels(
+                [f"{r['Dag']}\n{pd.to_datetime(r['Datum']).strftime('%d-%m')}"
+                 for _, r in plot_df.iterrows()],
+                fontsize=9, color=_KLEUR_TEXT,
+            )
+            ax.set_ylabel(y_label, fontsize=9, color=_KLEUR_TEXT)
+            ax.legend(loc="upper right", fontsize=8, frameon=False)
+            _style_axis(ax)
+            _pad_ylim(ax, werkelijk, norm_waarden)
+            ax.set_title(titel, loc="left", pad=10, color=_KLEUR_TEXT,
+                         fontsize=11, fontweight="semibold")
+
+        def _draw_ytd_chart(ax, ytd_df, value_col, norm_getter, y_label, titel):
+            """YTD per ISO-week: werkelijk als bars, norm als lijn."""
+            if ytd_df.empty:
+                ax.text(0.5, 0.5, "Geen YTD-data beschikbaar", ha="center", va="center",
+                        transform=ax.transAxes, color="#999", fontsize=10)
+                ax.set_axis_off()
+                ax.set_title(titel, loc="left", pad=10, color=_KLEUR_TEXT,
+                             fontsize=11, fontweight="semibold")
+                return
+            weken = ytd_df["Weeknr"].tolist()
+            werkelijk = ytd_df[value_col].tolist()
+            norm_waarden = [norm_getter(d) for d in ytd_df["Week_startdatum"]]
+            x = np.arange(len(weken))
+
+            ax.bar(x, [v if pd.notna(v) else 0 for v in werkelijk],
+                   width=0.75, color=_KLEUR_WERKELIJK, alpha=0.85,
+                   edgecolor="none", label="Werkelijk", zorder=2)
+            ax.plot(x, norm_waarden, color=_KLEUR_NORM, linestyle="--", linewidth=1.6,
+                    marker="", label="Norm", zorder=3)
+
+            # Tick spacing: max ~10 labels om overlap te voorkomen
+            step = 1 if len(weken) <= 10 else max(1, len(weken) // 10)
+            tick_idx = list(range(0, len(weken), step))
+            # Zorg dat de laatste week zichtbaar is — vervang de laatste als hij te
+            # dicht op de nieuwe laatste zou komen te staan, anders toevoegen.
+            last_i = len(weken) - 1
+            if tick_idx and tick_idx[-1] != last_i:
+                if last_i - tick_idx[-1] < step:
+                    tick_idx[-1] = last_i
+                else:
+                    tick_idx.append(last_i)
+            ax.set_xticks(tick_idx)
+            ax.set_xticklabels([f"w{weken[i]}" for i in tick_idx],
+                               fontsize=9, color=_KLEUR_TEXT)
+            ax.set_ylabel(y_label, fontsize=9, color=_KLEUR_TEXT)
+            ax.legend(loc="upper right", fontsize=8, frameon=False)
+            _style_axis(ax)
+            _pad_ylim(ax, werkelijk, norm_waarden)
+            ax.set_title(titel, loc="left", pad=10, color=_KLEUR_TEXT,
+                         fontsize=11, fontweight="semibold")
+
+        # ── Week-grafieken (huidige selectie, ma t/m vr) ───────────────────────────
+        st.markdown(f"### Verloop deze week (week {int(gekozen_week)}, ma t/m vr)")
+        _plot_week = week_curr.head(5).copy()
+
+        fig_w, axes_w = plt.subplots(1, 3, figsize=(15, 3.6), dpi=110)
+        fig_w.patch.set_facecolor("white")
+        _draw_week_chart(axes_w[0], _plot_week, "MANUREN / TON",
+                         get_norm_manuren_per_ton, "manuren / ton",
+                         "Manuren per ton")
+        _draw_week_chart(axes_w[1], _plot_week, "AANTAL TRAVERSEN",
+                         get_norm_traversen_per_dag, "traversen",
+                         "Aantal traversen")
+        _draw_week_chart(axes_w[2], _plot_week, "GEM GEWICHT PER TR",
+                         get_norm_gem_gewicht_per_traverse, "kg / traverse",
+                         "Gemiddeld gewicht per traverse")
+        fig_w.tight_layout()
+        st.pyplot(fig_w)
+        plt.close(fig_w)
+
+        # ── Week-grafieken (vorige week, ma t/m vr) ────────────────────────────────
+        st.markdown(f"### Verloop vorige week (week {int(_iso_prev.week)}, ma t/m vr)")
+        _plot_week_prev = week_prev.head(5).copy()
+
+        fig_wp, axes_wp = plt.subplots(1, 3, figsize=(15, 3.6), dpi=110)
+        fig_wp.patch.set_facecolor("white")
+        _draw_week_chart(axes_wp[0], _plot_week_prev, "MANUREN / TON",
+                         get_norm_manuren_per_ton, "manuren / ton",
+                         "Manuren per ton")
+        _draw_week_chart(axes_wp[1], _plot_week_prev, "AANTAL TRAVERSEN",
+                         get_norm_traversen_per_dag, "traversen",
+                         "Aantal traversen")
+        _draw_week_chart(axes_wp[2], _plot_week_prev, "GEM GEWICHT PER TR",
+                         get_norm_gem_gewicht_per_traverse, "kg / traverse",
+                         "Gemiddeld gewicht per traverse")
+        fig_wp.tight_layout()
+        st.pyplot(fig_wp)
+        plt.close(fig_wp)
+
+        # ── YTD-grafieken (per ISO-week van gekozen jaar) ──────────────────────────
+        st.markdown(f"### Year to date ({int(gekozen_jaar)}, per week)")
+        ytd_df = build_productie_dashboard_ytd(mis_df, int(gekozen_jaar))
+        if ytd_df.empty:
+            st.info("Nog geen YTD-data voor dit jaar beschikbaar.")
+        else:
+            fig_y, axes_y = plt.subplots(1, 3, figsize=(15, 3.6), dpi=110)
+            fig_y.patch.set_facecolor("white")
+            _draw_ytd_chart(axes_y[0], ytd_df, "Manuren_per_ton_gewogen",
+                            get_norm_manuren_per_ton, "manuren / ton",
+                            "Manuren per ton (gem. per dag)")
+            _draw_ytd_chart(axes_y[1], ytd_df, "Traversen_totaal",
+                            lambda d: get_norm_traversen_per_dag(d) * 5,
+                            "traversen / week",
+                            "Aantal traversen per week")
+            _draw_ytd_chart(axes_y[2], ytd_df, "Gem_gewicht_per_traverse",
+                            get_norm_gem_gewicht_per_traverse, "kg / traverse",
+                            "Gemiddeld gewicht per traverse")
+            fig_y.tight_layout()
+            st.pyplot(fig_y)
+            plt.close(fig_y)
+            st.caption(
+                "YTD-aggregatie: manuren/ton is het rekenkundig gemiddelde van de dagwaarden per week. "
+                "Gem gewicht/traverse is som(KG)/som(traversen) per week. "
+                "Norm voor traversen is dag-norm × 5 werkdagen."
+            )
+
+        # ── OTIF-trend (uit snapshot-historie) ─────────────────────────────────────
+        st.markdown("### OTIF-trend")
+        trend_col_l, trend_col_r = st.columns([1, 5])
+        with trend_col_l:
+            _trend_periode = st.selectbox(
+                "Periode",
+                options=[30, 60, 90, 180, 365],
+                index=2,  # default 90 dagen
+                format_func=lambda n: f"laatste {n} dagen",
+                key="prod_dashboard_trend_periode",
+            )
+        trend_df = build_otif_trend_df(snapshots, days_back=int(_trend_periode))
+
+        if trend_df.empty:
+            st.info(
+                "Nog geen OTIF-historie beschikbaar. Snapshots worden automatisch "
+                "opgebouwd zodra de app dagelijks wordt geopend. Bestaande historie "
+                "kan handmatig aangevuld worden via 'Backfill snapshot' in de "
+                "beheer-expander hierboven."
+            )
+        else:
+            fig_t, ax_t = plt.subplots(figsize=(15, 3.4), dpi=110)
+            fig_t.patch.set_facecolor("white")
+            x = np.arange(len(trend_df))
+            pcts = trend_df["OTIF_pct"].tolist()
+            # Aparte kleur voor backfilled punten
+            colors = ["#F59E0B" if bf else _KLEUR_WERKELIJK
+                      for bf in trend_df["Backfilled"].tolist()]
+            ax_t.plot(x, pcts, color=_KLEUR_WERKELIJK, linewidth=1.6,
+                      marker="", label="OTIF %", zorder=2)
+            ax_t.scatter(x, pcts, c=colors, s=22, zorder=3, edgecolor="white", linewidth=0.6)
+            # Norm-lijnen (OTIF thresholds)
+            ax_t.axhline(y=OTIF_GAUGE_GREEN_THRESHOLD, color="#2E9E4B", linestyle=":",
+                         linewidth=1.2, alpha=0.7, label=f"Groen ≥ {int(OTIF_GAUGE_GREEN_THRESHOLD)}%")
+            ax_t.axhline(y=OTIF_GAUGE_ORANGE_THRESHOLD, color="#C77A00", linestyle=":",
+                         linewidth=1.2, alpha=0.7, label=f"Oranje ≥ {int(OTIF_GAUGE_ORANGE_THRESHOLD)}%")
+
+            # X-as ticks: max ~10 datum-labels
+            n = len(trend_df)
+            step = 1 if n <= 10 else max(1, n // 10)
+            tick_idx = list(range(0, n, step))
+            if tick_idx and tick_idx[-1] != n - 1:
+                if (n - 1) - tick_idx[-1] < step:
+                    tick_idx[-1] = n - 1
+                else:
+                    tick_idx.append(n - 1)
+            ax_t.set_xticks(tick_idx)
+            ax_t.set_xticklabels(
+                [trend_df.iloc[i]["Datum"].strftime("%d-%m") for i in tick_idx],
+                fontsize=9, color=_KLEUR_TEXT,
+            )
+            ax_t.set_ylabel("OTIF %", fontsize=9, color=_KLEUR_TEXT)
+            ax_t.set_ylim(0, 105)
+            ax_t.legend(loc="lower left", fontsize=8, frameon=False, ncol=3)
+            _style_axis(ax_t)
+            ax_t.set_title(f"OTIF over de laatste {int(_trend_periode)} dagen",
+                           loc="left", pad=10, color=_KLEUR_TEXT,
+                           fontsize=11, fontweight="semibold")
+            fig_t.tight_layout()
+            st.pyplot(fig_t)
+            plt.close(fig_t)
+
+            n_backfilled = int(trend_df["Backfilled"].sum())
+            if n_backfilled:
+                st.caption(
+                    f"Oranje punten zijn backfilled snapshots ({n_backfilled} van {len(trend_df)}) "
+                    "— die zijn achteraf gemaakt en minder accuraat dan on-the-day snapshots."
+                )
 
 
 with tab2:
-    st.subheader("Gebruikte gegevens / controletabel")
-    relevant_cols = ["Bronbestand","Bron_week","Nummer","Ordernummer_base","Debiteurnummer","Klantnaam","Segment_debtor_export","Materiaaltype","Gewicht_effectief_kg","Status","Verzinkstatus","Meegeteld_in_planning","Reden_uitsluiting","Datum","Leverdatum","Verzinkdatum","Aanleveren depot","Gewicht","Gewicht_export_kg","Gewicht_order_kg","Regels_per_order","Gewicht_2g_verdeeld_kg","Gewicht_bron","Poetsorder","Poetsorder_reden","Stuks","Stuks_bron","Kg_per_stuk_gebruikt"]
-    relevant_cols = [c for c in relevant_cols if c in df.columns]
-    controle_df = df[relevant_cols].copy() if toon_alle_regels else df_plan[relevant_cols].copy()
+    if _tab_open(tab2):
+        st.subheader("Gebruikte gegevens / controletabel")
+        relevant_cols = ["Bronbestand","Bron_week","Nummer","Ordernummer_base","Debiteurnummer","Klantnaam","Segment_debtor_export","Materiaaltype","Gewicht_effectief_kg","Status","Verzinkstatus","Meegeteld_in_planning","Reden_uitsluiting","Datum","Leverdatum","Verzinkdatum","Aanleveren depot","Gewicht","Gewicht_export_kg","Gewicht_order_kg","Regels_per_order","Gewicht_2g_verdeeld_kg","Gewicht_bron","Poetsorder","Poetsorder_reden","Stuks","Stuks_bron","Kg_per_stuk_gebruikt"]
+        relevant_cols = [c for c in relevant_cols if c in df.columns]
+        controle_df = df[relevant_cols].copy() if toon_alle_regels else df_plan[relevant_cols].copy()
 
-    # Houd een interne datumkolom beschikbaar voor filtering, voordat we naar display-format omzetten.
-    if "Verzinkdatum" in controle_df.columns:
-        controle_df["_Verzinkdatum_filter"] = pd.to_datetime(controle_df["Verzinkdatum"], errors="coerce")
+        # Houd een interne datumkolom beschikbaar voor filtering, voordat we naar display-format omzetten.
+        if "Verzinkdatum" in controle_df.columns:
+            controle_df["_Verzinkdatum_filter"] = pd.to_datetime(controle_df["Verzinkdatum"], errors="coerce")
 
-    st.markdown("### Filters")
-    filter_col1, filter_col2, filter_col3, filter_col4, filter_col5 = st.columns([1.2, 1, 1, 1, 1.2])
+        st.markdown("### Filters")
+        filter_col1, filter_col2, filter_col3, filter_col4, filter_col5 = st.columns([1.2, 1, 1, 1, 1.2])
 
-    with filter_col1:
-        if "Status" in controle_df.columns:
-            status_options = sorted([str(x) for x in controle_df["Status"].dropna().unique()])
-            selected_status = st.multiselect(
-                "Status",
-                options=status_options,
-                default=status_options,
-                help="Selecteer één of meerdere statussen. Alleen regels met deze status worden getoond.",
-            )
-        else:
-            selected_status = []
+        with filter_col1:
+            if "Status" in controle_df.columns:
+                status_options = sorted([str(x) for x in controle_df["Status"].dropna().unique()])
+                selected_status = st.multiselect(
+                    "Status",
+                    options=status_options,
+                    default=status_options,
+                    help="Selecteer één of meerdere statussen. Alleen regels met deze status worden getoond.",
+                )
+            else:
+                selected_status = []
 
-    with filter_col2:
-        if "_Verzinkdatum_filter" in controle_df.columns and controle_df["_Verzinkdatum_filter"].notna().any():
-            min_verzinkdatum = controle_df["_Verzinkdatum_filter"].min().date()
-            max_verzinkdatum = controle_df["_Verzinkdatum_filter"].max().date()
-            verzinkdatum_van = st.date_input("Verzinkdatum vanaf", value=min_verzinkdatum)
-        else:
-            verzinkdatum_van = None
+        with filter_col2:
+            if "_Verzinkdatum_filter" in controle_df.columns and controle_df["_Verzinkdatum_filter"].notna().any():
+                min_verzinkdatum = controle_df["_Verzinkdatum_filter"].min().date()
+                max_verzinkdatum = controle_df["_Verzinkdatum_filter"].max().date()
+                verzinkdatum_van = st.date_input("Verzinkdatum vanaf", value=min_verzinkdatum)
+            else:
+                verzinkdatum_van = None
 
-    with filter_col3:
-        if "_Verzinkdatum_filter" in controle_df.columns and controle_df["_Verzinkdatum_filter"].notna().any():
-            verzinkdatum_tot = st.date_input("Verzinkdatum t/m", value=max_verzinkdatum)
-        else:
-            verzinkdatum_tot = None
+        with filter_col3:
+            if "_Verzinkdatum_filter" in controle_df.columns and controle_df["_Verzinkdatum_filter"].notna().any():
+                verzinkdatum_tot = st.date_input("Verzinkdatum t/m", value=max_verzinkdatum)
+            else:
+                verzinkdatum_tot = None
 
-    with filter_col4:
-        if "Verzinkstatus" in controle_df.columns:
-            verzinkstatus_opties = sorted([str(x) for x in controle_df["Verzinkstatus"].dropna().unique()])
-            selected_verzinkstatus = st.multiselect(
-                "Verzinkstatus",
-                options=verzinkstatus_opties,
-                default=verzinkstatus_opties,
-            )
-        else:
-            selected_verzinkstatus = []
+        with filter_col4:
+            if "Verzinkstatus" in controle_df.columns:
+                verzinkstatus_opties = sorted([str(x) for x in controle_df["Verzinkstatus"].dropna().unique()])
+                selected_verzinkstatus = st.multiselect(
+                    "Verzinkstatus",
+                    options=verzinkstatus_opties,
+                    default=verzinkstatus_opties,
+                )
+            else:
+                selected_verzinkstatus = []
 
-    with filter_col5:
-        if "Materiaaltype" in controle_df.columns:
-            materiaaltype_opties = [m for m in MATERIAALTYPE_ORDER if m in set(controle_df["Materiaaltype"].dropna().astype(str))]
-            overige_opties = sorted([m for m in controle_df["Materiaaltype"].dropna().astype(str).unique() if m not in materiaaltype_opties])
-            materiaaltype_opties = materiaaltype_opties + overige_opties
-            selected_materiaaltype = st.multiselect(
-                "Materiaaltype",
-                options=materiaaltype_opties,
-                default=materiaaltype_opties,
-            )
-        else:
-            selected_materiaaltype = []
+        with filter_col5:
+            if "Materiaaltype" in controle_df.columns:
+                materiaaltype_opties = [m for m in MATERIAALTYPE_ORDER if m in set(controle_df["Materiaaltype"].dropna().astype(str))]
+                overige_opties = sorted([m for m in controle_df["Materiaaltype"].dropna().astype(str).unique() if m not in materiaaltype_opties])
+                materiaaltype_opties = materiaaltype_opties + overige_opties
+                selected_materiaaltype = st.multiselect(
+                    "Materiaaltype",
+                    options=materiaaltype_opties,
+                    default=materiaaltype_opties,
+                )
+            else:
+                selected_materiaaltype = []
 
-    filtered_df = controle_df.copy()
+        filtered_df = controle_df.copy()
 
-    if "Status" in filtered_df.columns and selected_status:
-        filtered_df = filtered_df[filtered_df["Status"].astype(str).isin(selected_status)]
+        if "Status" in filtered_df.columns and selected_status:
+            filtered_df = filtered_df[filtered_df["Status"].astype(str).isin(selected_status)]
 
-    if "Verzinkstatus" in filtered_df.columns and selected_verzinkstatus:
-        filtered_df = filtered_df[filtered_df["Verzinkstatus"].astype(str).isin(selected_verzinkstatus)]
+        if "Verzinkstatus" in filtered_df.columns and selected_verzinkstatus:
+            filtered_df = filtered_df[filtered_df["Verzinkstatus"].astype(str).isin(selected_verzinkstatus)]
 
-    if "Materiaaltype" in filtered_df.columns and selected_materiaaltype:
-        filtered_df = filtered_df[filtered_df["Materiaaltype"].astype(str).isin(selected_materiaaltype)]
+        if "Materiaaltype" in filtered_df.columns and selected_materiaaltype:
+            filtered_df = filtered_df[filtered_df["Materiaaltype"].astype(str).isin(selected_materiaaltype)]
 
-    if "_Verzinkdatum_filter" in filtered_df.columns:
-        if verzinkdatum_van is not None:
-            filtered_df = filtered_df[filtered_df["_Verzinkdatum_filter"].dt.date >= verzinkdatum_van]
-        if verzinkdatum_tot is not None:
-            filtered_df = filtered_df[filtered_df["_Verzinkdatum_filter"].dt.date <= verzinkdatum_tot]
+        if "_Verzinkdatum_filter" in filtered_df.columns:
+            if verzinkdatum_van is not None:
+                filtered_df = filtered_df[filtered_df["_Verzinkdatum_filter"].dt.date >= verzinkdatum_van]
+            if verzinkdatum_tot is not None:
+                filtered_df = filtered_df[filtered_df["_Verzinkdatum_filter"].dt.date <= verzinkdatum_tot]
 
-    st.caption(f"Getoonde regels: {len(filtered_df):,}".replace(",", "."))
+        st.caption(f"Getoonde regels: {len(filtered_df):,}".replace(",", "."))
 
-    display_df = filtered_df.copy()
-    if "Datum" in display_df.columns:
-        display_df["Datum"] = pd.to_datetime(display_df["Datum"], errors="coerce").dt.date
-    if "Leverdatum" in display_df.columns:
-        display_df["Leverdatum"] = pd.to_datetime(display_df["Leverdatum"], errors="coerce").dt.date
-    if "Verzinkdatum" in display_df.columns:
-        display_df["Verzinkdatum"] = pd.to_datetime(display_df["Verzinkdatum"], errors="coerce").dt.date
-    for c in ["Gewicht_export_kg","Gewicht_order_kg","Gewicht_2g_verdeeld_kg","Gewicht_effectief_kg"]:
-        if c in display_df.columns:
-            display_df[c] = display_df[c].round(2)
+        display_df = filtered_df.copy()
+        if "Datum" in display_df.columns:
+            display_df["Datum"] = pd.to_datetime(display_df["Datum"], errors="coerce").dt.date
+        if "Leverdatum" in display_df.columns:
+            display_df["Leverdatum"] = pd.to_datetime(display_df["Leverdatum"], errors="coerce").dt.date
+        if "Verzinkdatum" in display_df.columns:
+            display_df["Verzinkdatum"] = pd.to_datetime(display_df["Verzinkdatum"], errors="coerce").dt.date
+        for c in ["Gewicht_export_kg","Gewicht_order_kg","Gewicht_2g_verdeeld_kg","Gewicht_effectief_kg"]:
+            if c in display_df.columns:
+                display_df[c] = display_df[c].round(2)
 
-    if "_Verzinkdatum_filter" in display_df.columns:
-        display_df = display_df.drop(columns=["_Verzinkdatum_filter"])
+        if "_Verzinkdatum_filter" in display_df.columns:
+            display_df = display_df.drop(columns=["_Verzinkdatum_filter"])
 
-    st.dataframe(display_df, width="stretch", hide_index=True)
+        st.dataframe(display_df, width="stretch", hide_index=True)
 
-    # ── xlsx-export ──────────────────────────────────────────────────────
-    # Export gebruikt dezelfde filters als de tabel op het scherm.
-    import io
-    xlsx_buffer = io.BytesIO()
-    with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
-        display_df.to_excel(writer, index=False, sheet_name="Gebruikte gegevens")
-    xlsx_buffer.seek(0)
-    st.download_button(
-        label="📥 Download gefilterde tabel als Excel (.xlsx)",
-        data=xlsx_buffer,
-        file_name=f"capaciteitsplanning_export_{date.today().strftime('%Y%m%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+        # ── xlsx-export ──────────────────────────────────────────────────────
+        # Export gebruikt dezelfde filters als de tabel op het scherm.
+        import io
+        xlsx_buffer = io.BytesIO()
+        with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
+            display_df.to_excel(writer, index=False, sheet_name="Gebruikte gegevens")
+        xlsx_buffer.seek(0)
+        st.download_button(
+            label="📥 Download gefilterde tabel als Excel (.xlsx)",
+            data=xlsx_buffer,
+            file_name=f"capaciteitsplanning_export_{date.today().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 with tab3:
-    st.subheader("OTIF – On Time In Full")
+    if _tab_open(tab3):
+        st.subheader("OTIF – On Time In Full")
 
-    peildatum_str = pd.Timestamp(otif_result["peildatum"]).strftime("%d-%m-%Y")
-    _caption_regels = [
-        f"Peildatum: **{peildatum_str}** · vergeleken met **{otif_result['date_column_label']}** · "
-        f"reserveringen worden niet meegeteld."
-    ]
-    if otif_result.get("depot_shift_actief"):
-        vw = otif_result.get("peildatum_vorige_werkdag")
-        vw_str = pd.Timestamp(vw).strftime("%d-%m-%Y") if vw is not None else ""
-        _caption_regels.append(
-            f"Depot-orders (`Aanleveren depot = 1`) hebben een deadline van "
-            f"17:00 op hun leverdatum en worden pas de eerstvolgende werkdag "
-            f"gemeten. Op deze peildatum tellen depot-orders met leverdatum "
-            f"**{vw_str}** mee ({otif_result.get('aantal_depot', 0)} stuks)."
-        )
-    n_ub = otif_result.get("aantal_ub_uitgesloten", 0)
-    if n_ub > 0:
-        _caption_regels.append(
-            f"UB-orders (uitbesteed) zijn uit deze OTIF weggelaten: "
-            f"**{n_ub}** order{'s' if n_ub != 1 else ''}, ongeacht of ze als "
-            f"'Ja' of 'Nee' zouden zijn geteld. UB hoort niet bij de "
-            f"verzinkstraat."
-        )
-    n_klant = otif_result.get("aantal_klant_uitgesloten", 0)
-    if n_klant > 0:
-        _caption_regels.append(
-            f"Orders van uitgesloten klanten zijn uit deze OTIF weggelaten: "
-            f"**{n_klant}** order{'s' if n_klant != 1 else ''}."
-        )
-    n_coat = otif_result.get("aantal_coat_uitgesloten", 0)
-    if n_coat > 0:
-        _caption_regels.append(
-            f"Coat-orders zijn uit deze OTIF weggelaten: **{n_coat}** order"
-            f"{'s' if n_coat != 1 else ''} viel(en) op deze peildatum maar "
-            f"hebben een ordernummer van de vorm `…C…` (coat-alleen) of "
-            f"eindigen op `-C` (coat-deel van een gecombineerde verzink+coat-"
-            f"order). Deze horen niet bij de verzinkstraat en zouden de "
-            f"OTIF-score onterecht beïnvloeden."
-        )
-    st.caption(" ".join(_caption_regels))
+        peildatum_str = pd.Timestamp(otif_result["peildatum"]).strftime("%d-%m-%Y")
+        _caption_regels = [
+            f"Peildatum: **{peildatum_str}** · vergeleken met **{otif_result['date_column_label']}** · "
+            f"reserveringen worden niet meegeteld."
+        ]
+        if otif_result.get("depot_shift_actief"):
+            vw = otif_result.get("peildatum_vorige_werkdag")
+            vw_str = pd.Timestamp(vw).strftime("%d-%m-%Y") if vw is not None else ""
+            _caption_regels.append(
+                f"Depot-orders (`Aanleveren depot = 1`) hebben een deadline van "
+                f"17:00 op hun leverdatum en worden pas de eerstvolgende werkdag "
+                f"gemeten. Op deze peildatum tellen depot-orders met leverdatum "
+                f"**{vw_str}** mee ({otif_result.get('aantal_depot', 0)} stuks)."
+            )
+        n_ub = otif_result.get("aantal_ub_uitgesloten", 0)
+        if n_ub > 0:
+            _caption_regels.append(
+                f"UB-orders (uitbesteed) zijn uit deze OTIF weggelaten: "
+                f"**{n_ub}** order{'s' if n_ub != 1 else ''}, ongeacht of ze als "
+                f"'Ja' of 'Nee' zouden zijn geteld. UB hoort niet bij de "
+                f"verzinkstraat."
+            )
+        n_klant = otif_result.get("aantal_klant_uitgesloten", 0)
+        if n_klant > 0:
+            _caption_regels.append(
+                f"Orders van uitgesloten klanten zijn uit deze OTIF weggelaten: "
+                f"**{n_klant}** order{'s' if n_klant != 1 else ''}."
+            )
+        n_coat = otif_result.get("aantal_coat_uitgesloten", 0)
+        if n_coat > 0:
+            _caption_regels.append(
+                f"Coat-orders zijn uit deze OTIF weggelaten: **{n_coat}** order"
+                f"{'s' if n_coat != 1 else ''} viel(en) op deze peildatum maar "
+                f"hebben een ordernummer van de vorm `…C…` (coat-alleen) of "
+                f"eindigen op `-C` (coat-deel van een gecombineerde verzink+coat-"
+                f"order). Deze horen niet bij de verzinkstraat en zouden de "
+                f"OTIF-score onterecht beïnvloeden."
+            )
+        st.caption(" ".join(_caption_regels))
 
-    # Kerngetallen boven de tabel.
-    kpi_col1, kpi_col2, kpi_col3, kpi_col4, kpi_col5 = st.columns(5)
-    kpi_col1.metric("Totaal orders", f"{otif_result['totaal']:,}".replace(",", "."))
-    kpi_col2.metric("Gereed (Ja)", f"{otif_result['gereed']:,}".replace(",", "."))
-    kpi_col3.metric("Te laat (Nee)", f"{otif_result['niet_gereed']:,}".replace(",", "."))
-    kpi_col4.metric("Nvt", f"{otif_result['nvt']:,}".replace(",", "."))
-    otif_pct_str = "n.v.t." if otif_result["otif_pct"] is None else f"{otif_result['otif_pct']:.1f}%"
-    kpi_col5.metric("OTIF", otif_pct_str)
+        # Kerngetallen boven de tabel.
+        kpi_col1, kpi_col2, kpi_col3, kpi_col4, kpi_col5 = st.columns(5)
+        kpi_col1.metric("Totaal orders", f"{otif_result['totaal']:,}".replace(",", "."))
+        kpi_col2.metric("Gereed (Ja)", f"{otif_result['gereed']:,}".replace(",", "."))
+        kpi_col3.metric("Te laat (Nee)", f"{otif_result['niet_gereed']:,}".replace(",", "."))
+        kpi_col4.metric("Nvt", f"{otif_result['nvt']:,}".replace(",", "."))
+        otif_pct_str = "n.v.t." if otif_result["otif_pct"] is None else f"{otif_result['otif_pct']:.1f}%"
+        kpi_col5.metric("OTIF", otif_pct_str)
 
-    # Gauge groter tonen naast een korte formule-uitleg.
-    gauge_col, uitleg_col = st.columns([1, 1.1])
-    with gauge_col:
-        st.pyplot(
-            make_otif_gauge(
-                otif_result["otif_pct"],
-                title=f"OTIF · {otif_result['date_column_label']} = {peildatum_str}",
-                figsize=(6.0, 4.0),
-            ),
-            clear_figure=True,
-            use_container_width=True,
-        )
-    with uitleg_col:
-        st.markdown(
-            f"""
+        # Gauge groter tonen naast een korte formule-uitleg.
+        gauge_col, uitleg_col = st.columns([1, 1.1])
+        with gauge_col:
+            st.pyplot(
+                make_otif_gauge(
+                    otif_result["otif_pct"],
+                    title=f"OTIF · {otif_result['date_column_label']} = {peildatum_str}",
+                    figsize=(6.0, 4.0),
+                ),
+                clear_figure=True,
+                use_container_width=True,
+            )
+        with uitleg_col:
+            st.markdown(
+                f"""
 **Berekening**  
 OTIF = (1 − *aantal te laat* / *totaal aantal orders*) × 100 %  
 = (1 − {otif_result['niet_gereed']} / {max(otif_result['totaal'], 1)}) × 100 %  
@@ -1964,137 +2023,161 @@ Groen op de meter vanaf **{OTIF_GAUGE_GREEN_THRESHOLD:.0f}%**, oranje vanaf **{O
 
 *De schaal is bewust niet-lineair: elke zone (rood, oranje, groen) beslaat een even groot deel van de meter, zodat de groene zone (96–100 %) duidelijk zichtbaar blijft. Binnen elke zone is de naaldpositie wél lineair.*
 """
-        )
-
-    st.markdown("---")
-    st.subheader("Gebruikte gegevens (OTIF)")
-
-    otif_orders = otif_result["orders"]
-    if otif_orders.empty:
-        st.info(
-            "Geen orders gevonden met de gekozen peildatum in "
-            f"'{otif_result['date_column_label']}'. Controleer eventueel of de "
-            "juiste peildatum in de zijbalk is geselecteerd."
-        )
-    else:
-        # Kolomkeuze: aansluiten bij 'Gebruikte gegevens' voor herkenbaarheid.
-        # Is_depot (van compute_otif) wordt naast Aanleveren depot getoond
-        # zodat direct duidelijk is welke regels een verschoven peildatum
-        # hebben.
-        otif_cols = [
-            "Bronbestand", "Bron_week", "Nummer", "Ordernummer_base",
-            "Debiteurnummer", "Klantnaam",
-            "Segment_debtor_export", "Materiaaltype",
-            "Datum", "Leverdatum", "Originele_leverdatum",
-            "Aanleveren depot", "Is_depot",
-            "Status", "OTIF_status", "Verzinkstatus",
-            "Gewicht_effectief_kg", "Gewicht_bron",
-        ]
-        otif_cols = [c for c in otif_cols if c in otif_orders.columns]
-        otif_orders_display = otif_orders[otif_cols].copy()
-
-        # Filter op OTIF-status voor snelle drill-down.
-        f_col1, f_col2 = st.columns([1, 3])
-        with f_col1:
-            otif_status_opties = ["Ja", "Nee", "Nvt", "Onbekend"]
-            beschikbare_status = [s for s in otif_status_opties if s in set(otif_orders_display["OTIF_status"].astype(str))]
-            selected_otif_status = st.multiselect(
-                "OTIF-status",
-                options=beschikbare_status,
-                default=beschikbare_status,
             )
 
-        if selected_otif_status:
-            otif_orders_display = otif_orders_display[otif_orders_display["OTIF_status"].astype(str).isin(selected_otif_status)]
+        st.markdown("---")
+        st.subheader("Gebruikte gegevens (OTIF)")
 
-        # Datums netjes weergeven.
-        for c in ("Datum", "Leverdatum", "Originele_leverdatum"):
-            if c in otif_orders_display.columns:
-                otif_orders_display[c] = pd.to_datetime(otif_orders_display[c], errors="coerce").dt.date
-        if "Gewicht_effectief_kg" in otif_orders_display.columns:
-            otif_orders_display["Gewicht_effectief_kg"] = otif_orders_display["Gewicht_effectief_kg"].round(2)
-
-        def _color_otif_row(row):
-            status_value = str(row.get("OTIF_status", ""))
-            if status_value == "Ja":
-                return ["background-color: rgba(22, 163, 74, 0.10)"] * len(row)
-            if status_value == "Nee":
-                return ["background-color: rgba(220, 38, 38, 0.12)"] * len(row)
-            if status_value == "Nvt":
-                return ["background-color: rgba(148, 163, 184, 0.15)"] * len(row)
-            return [""] * len(row)
-
-        st.caption(f"Getoonde regels: {len(otif_orders_display):,}".replace(",", "."))
-        st.dataframe(
-            otif_orders_display.style.apply(_color_otif_row, axis=1),
-            width="stretch",
-            hide_index=True,
-        )
-
-        # ── Excel-download van de OTIF-tabel ──────────────────────────────
-        import io
-        otif_pct_excel = (
-            "n.v.t." if otif_result["otif_pct"] is None
-            else round(otif_result["otif_pct"], 2)
-        )
-        otif_xlsx_buffer = io.BytesIO()
-        with pd.ExcelWriter(otif_xlsx_buffer, engine="openpyxl") as writer:
-            otif_orders_display.to_excel(writer, index=False, sheet_name="OTIF-orders")
-            # Samenvatting op tweede tabblad, zodat het bestand op zichzelf leesbaar is.
-            samenvatting_df = pd.DataFrame(
-                [
-                    {"Metric": "Peildatum",             "Waarde": peildatum_str},
-                    {"Metric": "Vergeleken met",        "Waarde": otif_result["date_column_label"]},
-                    {"Metric": "Totaal orders",         "Waarde": otif_result["totaal"]},
-                    {"Metric": "Gereed (Ja)",           "Waarde": otif_result["gereed"]},
-                    {"Metric": "Te laat (Nee)",         "Waarde": otif_result["niet_gereed"]},
-                    {"Metric": "Nvt",                   "Waarde": otif_result["nvt"]},
-                    {"Metric": "Onbekend",              "Waarde": otif_result["onbekend"]},
-                    {"Metric": "OTIF (%)",              "Waarde": otif_pct_excel},
-                    {"Metric": "Drempel groen (%)",     "Waarde": OTIF_GAUGE_GREEN_THRESHOLD},
-                    {"Metric": "Drempel oranje (%)",    "Waarde": OTIF_GAUGE_ORANGE_THRESHOLD},
-                ]
+        otif_orders = otif_result["orders"]
+        if otif_orders.empty:
+            st.info(
+                "Geen orders gevonden met de gekozen peildatum in "
+                f"'{otif_result['date_column_label']}'. Controleer eventueel of de "
+                "juiste peildatum in de zijbalk is geselecteerd."
             )
-            samenvatting_df.to_excel(writer, index=False, sheet_name="Samenvatting")
-        otif_xlsx_buffer.seek(0)
-        st.download_button(
-            label="📥 Download OTIF-gegevens als Excel (.xlsx)",
-            data=otif_xlsx_buffer,
-            file_name=(
-                f"otif_{otif_result['date_column']}_"
-                f"{pd.Timestamp(otif_result['peildatum']).strftime('%Y%m%d')}.xlsx"
-            ),
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        else:
+            # Kolomkeuze: aansluiten bij 'Gebruikte gegevens' voor herkenbaarheid.
+            # Is_depot (van compute_otif) wordt naast Aanleveren depot getoond
+            # zodat direct duidelijk is welke regels een verschoven peildatum
+            # hebben.
+            otif_cols = [
+                "Bronbestand", "Bron_week", "Nummer", "Ordernummer_base",
+                "Debiteurnummer", "Klantnaam",
+                "Segment_debtor_export", "Materiaaltype",
+                "Datum", "Leverdatum", "Originele_leverdatum",
+                "Aanleveren depot", "Is_depot",
+                "Status", "OTIF_status", "Verzinkstatus",
+                "Gewicht_effectief_kg", "Gewicht_bron",
+            ]
+            otif_cols = [c for c in otif_cols if c in otif_orders.columns]
+            otif_orders_display = otif_orders[otif_cols].copy()
+
+            # Filter op OTIF-status voor snelle drill-down.
+            f_col1, f_col2 = st.columns([1, 3])
+            with f_col1:
+                otif_status_opties = ["Ja", "Nee", "Nvt", "Onbekend"]
+                beschikbare_status = [s for s in otif_status_opties if s in set(otif_orders_display["OTIF_status"].astype(str))]
+                selected_otif_status = st.multiselect(
+                    "OTIF-status",
+                    options=beschikbare_status,
+                    default=beschikbare_status,
+                )
+
+            if selected_otif_status:
+                otif_orders_display = otif_orders_display[otif_orders_display["OTIF_status"].astype(str).isin(selected_otif_status)]
+
+            # Datums netjes weergeven.
+            for c in ("Datum", "Leverdatum", "Originele_leverdatum"):
+                if c in otif_orders_display.columns:
+                    otif_orders_display[c] = pd.to_datetime(otif_orders_display[c], errors="coerce").dt.date
+            if "Gewicht_effectief_kg" in otif_orders_display.columns:
+                otif_orders_display["Gewicht_effectief_kg"] = otif_orders_display["Gewicht_effectief_kg"].round(2)
+
+            def _color_otif_row(row):
+                status_value = str(row.get("OTIF_status", ""))
+                if status_value == "Ja":
+                    return ["background-color: rgba(22, 163, 74, 0.10)"] * len(row)
+                if status_value == "Nee":
+                    return ["background-color: rgba(220, 38, 38, 0.12)"] * len(row)
+                if status_value == "Nvt":
+                    return ["background-color: rgba(148, 163, 184, 0.15)"] * len(row)
+                return [""] * len(row)
+
+            st.caption(f"Getoonde regels: {len(otif_orders_display):,}".replace(",", "."))
+            st.dataframe(
+                otif_orders_display.style.apply(_color_otif_row, axis=1),
+                width="stretch",
+                hide_index=True,
+            )
+
+            # ── Excel-download van de OTIF-tabel ──────────────────────────────
+            import io
+            otif_pct_excel = (
+                "n.v.t." if otif_result["otif_pct"] is None
+                else round(otif_result["otif_pct"], 2)
+            )
+            otif_xlsx_buffer = io.BytesIO()
+            with pd.ExcelWriter(otif_xlsx_buffer, engine="openpyxl") as writer:
+                otif_orders_display.to_excel(writer, index=False, sheet_name="OTIF-orders")
+                # Samenvatting op tweede tabblad, zodat het bestand op zichzelf leesbaar is.
+                samenvatting_df = pd.DataFrame(
+                    [
+                        {"Metric": "Peildatum",             "Waarde": peildatum_str},
+                        {"Metric": "Vergeleken met",        "Waarde": otif_result["date_column_label"]},
+                        {"Metric": "Totaal orders",         "Waarde": otif_result["totaal"]},
+                        {"Metric": "Gereed (Ja)",           "Waarde": otif_result["gereed"]},
+                        {"Metric": "Te laat (Nee)",         "Waarde": otif_result["niet_gereed"]},
+                        {"Metric": "Nvt",                   "Waarde": otif_result["nvt"]},
+                        {"Metric": "Onbekend",              "Waarde": otif_result["onbekend"]},
+                        {"Metric": "OTIF (%)",              "Waarde": otif_pct_excel},
+                        {"Metric": "Drempel groen (%)",     "Waarde": OTIF_GAUGE_GREEN_THRESHOLD},
+                        {"Metric": "Drempel oranje (%)",    "Waarde": OTIF_GAUGE_ORANGE_THRESHOLD},
+                    ]
+                )
+                samenvatting_df.to_excel(writer, index=False, sheet_name="Samenvatting")
+            otif_xlsx_buffer.seek(0)
+            st.download_button(
+                label="📥 Download OTIF-gegevens als Excel (.xlsx)",
+                data=otif_xlsx_buffer,
+                file_name=(
+                    f"otif_{otif_result['date_column']}_"
+                    f"{pd.Timestamp(otif_result['peildatum']).strftime('%Y%m%d')}.xlsx"
+                ),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
 with tab4:
-    st.subheader("Debug samenvatting")
-    debug_rows = [
-        {"Categorie":"Instellingen","Omschrijving":"Startdatum rapport","Waarde":str(startdatum)},
-        {"Categorie":"Instellingen","Omschrijving":"Capaciteit per dag (kg)","Waarde":int(capaciteit_kg)},
-        {"Categorie":"Instellingen","Omschrijving":"KG per traverse Constructie","Waarde":int(kg_per_traverse_constructie)},
-        {"Categorie":"Instellingen","Omschrijving":"KG per traverse Maatwerk","Waarde":int(kg_per_traverse_maatwerk)},
-        {"Categorie":"Instellingen","Omschrijving":"KG per traverse Seriewerk","Waarde":int(kg_per_traverse_seriewerk)},
-        {"Categorie":"Bestanden","Omschrijving":"Orderbestand","Waarde":order_file},
-        {"Categorie":"Kalender","Omschrijving":"Aantal feestdagen / sluitingen","Waarde":int(len(holiday_df))},
-        {"Categorie":"Records","Omschrijving":"Niet verzinkt","Waarde":int((df["Verzinkstatus"] == "Niet verzinkt").sum())},
-        {"Categorie":"Records","Omschrijving":"Voor startdatum rapport","Waarde":int(((df["Verzinkstatus"] == "Niet verzinkt") & (df["Verzinkdatum"] < pd.Timestamp(startdatum).normalize())).sum())},
-        {"Categorie":"Records","Omschrijving":"Coat-orders uitgesloten","Waarde":int((df["Reden_uitsluiting"] == "Coat-order").sum())},
-        {"Categorie":"Records","Omschrijving":"Open orders","Waarde":int((df["Meegeteld_in_planning"] == "Ja").sum())},
-        {"Categorie":"Gewicht","Omschrijving":"Totaal gewicht open orders (kg)","Waarde":int(round(df_plan["Gewicht_effectief_kg"].sum(), 0)) if len(df_plan) > 0 else 0},
-    ]
-    if "Materiaaltype" in df_plan.columns:
-        for materiaaltype in MATERIAALTYPE_ORDER:
-            debug_rows.append({
-                "Categorie":"Gewicht per materiaaltype",
-                "Omschrijving":materiaaltype,
-                "Waarde":int(round(df_plan.loc[df_plan["Materiaaltype"] == materiaaltype, "Gewicht_effectief_kg"].sum(), 0)),
+    if _tab_open(tab4):
+        st.subheader("Debug samenvatting")
+        debug_rows = [
+            {"Categorie":"Instellingen","Omschrijving":"Startdatum rapport","Waarde":str(startdatum)},
+            {"Categorie":"Instellingen","Omschrijving":"Capaciteit per dag (kg)","Waarde":int(capaciteit_kg)},
+            {"Categorie":"Instellingen","Omschrijving":"KG per traverse Constructie","Waarde":int(kg_per_traverse_constructie)},
+            {"Categorie":"Instellingen","Omschrijving":"KG per traverse Maatwerk","Waarde":int(kg_per_traverse_maatwerk)},
+            {"Categorie":"Instellingen","Omschrijving":"KG per traverse Seriewerk","Waarde":int(kg_per_traverse_seriewerk)},
+            {"Categorie":"Bestanden","Omschrijving":"Orderbestand","Waarde":order_file},
+            {"Categorie":"Kalender","Omschrijving":"Aantal feestdagen / sluitingen","Waarde":int(len(holiday_df))},
+            {"Categorie":"Records","Omschrijving":"Niet verzinkt","Waarde":int((df["Verzinkstatus"] == "Niet verzinkt").sum())},
+            {"Categorie":"Records","Omschrijving":"Voor startdatum rapport","Waarde":int(((df["Verzinkstatus"] == "Niet verzinkt") & (df["Verzinkdatum"] < pd.Timestamp(startdatum).normalize())).sum())},
+            {"Categorie":"Records","Omschrijving":"Coat-orders uitgesloten","Waarde":int((df["Reden_uitsluiting"] == "Coat-order").sum())},
+            {"Categorie":"Records","Omschrijving":"Open orders","Waarde":int((df["Meegeteld_in_planning"] == "Ja").sum())},
+            {"Categorie":"Gewicht","Omschrijving":"Totaal gewicht open orders (kg)","Waarde":int(round(df_plan["Gewicht_effectief_kg"].sum(), 0)) if len(df_plan) > 0 else 0},
+        ]
+        if "Materiaaltype" in df_plan.columns:
+            for materiaaltype in MATERIAALTYPE_ORDER:
+                debug_rows.append({
+                    "Categorie":"Gewicht per materiaaltype",
+                    "Omschrijving":materiaaltype,
+                    "Waarde":int(round(df_plan.loc[df_plan["Materiaaltype"] == materiaaltype, "Gewicht_effectief_kg"].sum(), 0)),
+                })
+        for _, row in export_file_summary.iterrows():
+            debug_rows.append({"Categorie":"Bestanden","Omschrijving":f'{row["Bronbestand"]} ({row["Bron_week"]})',"Waarde":int(row["Aantal_regels_ingelezen"])})
+        debug_df = pd.DataFrame(debug_rows)
+        debug_df["Waarde"] = debug_df["Waarde"].astype(str)
+        st.dataframe(debug_df, width="stretch", hide_index=True)
+
+        st.subheader("Snelheid")
+        _vorige = st.session_state.get("_laatste_run")
+        _tijd_rows = [{"Stap": stap, "Tijd (s)": round(sec, 2)} for stap, sec in _TIMINGS]
+        _tijd_rows.append({"Stap": "Totaal deze run tot hier", "Tijd (s)": round(time.perf_counter() - _RUN_START, 2)})
+        if _vorige:
+            _tijd_rows.append({
+                "Stap": f"Vorige run (tabblad {_vorige['tab']}), totaal",
+                "Tijd (s)": round(_vorige["sec"], 2),
             })
-    for _, row in export_file_summary.iterrows():
-        debug_rows.append({"Categorie":"Bestanden","Omschrijving":f'{row["Bronbestand"]} ({row["Bron_week"]})',"Waarde":int(row["Aantal_regels_ingelezen"])})
-    debug_df = pd.DataFrame(debug_rows)
-    debug_df["Waarde"] = debug_df["Waarde"].astype(str)
-    st.dataframe(debug_df, width="stretch", hide_index=True)
+        st.dataframe(pd.DataFrame(_tijd_rows), width="stretch", hide_index=True)
+        st.caption(
+            "Tijden van deze pagina-opbouw. Stappen die uit de cache komen duren "
+            "enkele honderdsten van een seconde. 'Vorige run' is de laatste klik "
+            "vóór het openen van dit tabblad, inclusief het tekenen van dat tabblad."
+        )
 
 with tab_balie:
-    render_balie(*_balie_args)
+    if _tab_open(tab_balie):
+        render_balie(*_balie_args)
+
+# Duur van deze run bewaren voor het tabblad Debug (tijdmeting).
+st.session_state["_laatste_run"] = {
+    "tab": st.session_state.get("hoofdtab", "Voorraad & OTIF"),
+    "sec": time.perf_counter() - _RUN_START,
+}

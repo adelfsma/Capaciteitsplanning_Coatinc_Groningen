@@ -122,16 +122,16 @@ def test_realistic_scenario():
           f"nvt={r1['nvt']}, onb={r1['onbekend']}, OTIF={r1['otif_pct']:.2f}%")
 
     # Handmatige controle:
-    #   Ja: 25+10+5+3=43
+    #   Ja: 25+10+5+3+3=46 (PC Afgehaald telt sinds de statuscorrectie als Ja)
     #   Nee: 6+2+4=12
-    #   Nvt: 3
+    #   Nvt: 0
     #   Onbekend: 2 (Gereserveerd*)
     #   Totaal (excl. reserveringen): 60
     #   OTIF = (1 - 12/60) * 100 = 80%
     assert r1["totaal"] == 60
-    assert r1["gereed"] == 43
+    assert r1["gereed"] == 46
     assert r1["niet_gereed"] == 12
-    assert r1["nvt"] == 3
+    assert r1["nvt"] == 0
     assert r1["onbekend"] == 2
     assert abs(r1["otif_pct"] - 80.0) < 1e-6
 
@@ -148,7 +148,7 @@ def test_realistic_scenario():
     # Dus 60 - 3 = 57 in de subset, met 12 - 3 = 9 nee.
     # OTIF = (1 - 9/57) * 100 ≈ 84.21%
     assert r2["totaal"] == 57
-    assert r2["gereed"] == 43
+    assert r2["gereed"] == 46  # incl. PC Afgehaald (Ja)
     assert r2["niet_gereed"] == 9
     assert abs(r2["otif_pct"] - (1 - 9/57) * 100) < 1e-6
 

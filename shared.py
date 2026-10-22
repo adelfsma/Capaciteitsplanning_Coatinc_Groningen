@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-APP_VERSION = "v2.5.24"
+APP_VERSION = "v2.5.25"
 
 
 def get_app_environment() -> str:
@@ -610,14 +610,38 @@ def list_cloud_files() -> list[str]:
 def save_metadata(info: dict) -> None:
     data = json.dumps(info, indent=2, ensure_ascii=False).encode("utf-8")
     upload_file("metadata.json", data)
+    # Direct zichtbaar maken in deze sessie (cache van load_metadata legen).
+    try:
+        load_metadata.clear()
+        _publicatie_versie.clear()
+    except Exception:
+        pass
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def load_metadata() -> dict | None:
+    """metadata.json uit de bucket. Gecachet met TTL 60s: voorheen werd dit
+    bestand bij élke klik in de viewer opnieuw gedownload."""
     try:
         data = download_file("metadata.json")
         return json.loads(data.decode("utf-8"))
     except Exception:
         return None
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _publicatie_versie() -> str:
+    """Kenmerk van de laatste publicatie (tijdstip + bestanden uit metadata.json).
+
+    Verandert bij elke publicatie in de beheeromgeving. load_published_data
+    gebruikt dit als cachesleutel, zodat de zware download en verwerking van
+    alle Excel-bestanden alleen opnieuw gebeurt als er echt iets nieuws is.
+    De controle zelf kost hooguit één kleine download per minuut.
+    """
+    meta = load_metadata()
+    if not meta:
+        return ""
+    return f"{meta.get('published_at', '')}|{','.join(sorted(meta.get('files', []) or []))}"
 
 
 # ── MIS-data (dagelijkse cumulatieve export) ──────────────────────────────────
@@ -1462,7 +1486,6 @@ def markeer_poetsorders(df: pd.DataFrame, orderregels: pd.DataFrame | None = Non
     return out
 
 
-@st.cache_data(ttl=60, show_spinner="Data laden uit de cloud…")
 def load_published_data():
     """
     Downloads all required files from the cloud bucket into a local temp
@@ -1470,11 +1493,20 @@ def load_published_data():
 
     Returns: (merged, export_file_summary, order_file_name, holiday_df)
 
-    Gecachet met TTL 60s: bij elke rerun binnen die tijd komt het resultaat
-    uit de cache. Nieuwe publicaties zijn binnen 60s zichtbaar. Om direct te
-    verversen: gebruik de 'Ververs data' knop in de sidebar (die roept
-    st.cache_data.clear() aan).
+    Caching (v2.5.25): het resultaat blijft bewaard tot er opnieuw
+    gepubliceerd is (zie _publicatie_versie) of de datum verandert. Voorheen
+    gebeurde de volledige download + verwerking elke 60 seconden opnieuw.
+    Nieuwe publicaties zijn nog steeds binnen ca. 60s zichtbaar; direct
+    verversen kan met de knop 'Ververs data' (st.cache_data.clear()).
     """
+    return _load_published_data_cached(_publicatie_versie(), date.today().isoformat())
+
+
+@st.cache_data(ttl=6 * 3600, max_entries=3, show_spinner="Data laden uit de cloud…")
+def _load_published_data_cached(publicatie_versie: str, datum: str):
+    """Zware variant van load_published_data. De argumenten zijn alleen
+    cachesleutels: een nieuwe publicatie of een nieuwe dag geeft een nieuwe
+    berekening. TTL van 6 uur als vangnet."""
     tmp = _ensure_temp()
 
     # Check which files exist in the cloud
